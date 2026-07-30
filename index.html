@@ -36,6 +36,10 @@
   const firebaseApp = firebase.initializeApp(firebaseConfig);
   const auth = firebase.auth();
   const db = firebase.firestore();
+  // Ayarlar'dan yeni kullanıcı eklerken mevcut oturumun (senin girişinin)
+  // bozulmaması için ayrı, ikincil bir Firebase bağlantısı:
+  const secondaryApp = firebase.initializeApp(firebaseConfig, 'Secondary');
+  const secondaryAuth = secondaryApp.auth();
 </script>
 </head>
 <body>
@@ -54,15 +58,16 @@
   </svg>
   <div class="landing-content">
     <div class="eyebrow">Sipariş · Cari · Stok Takip Sistemi</div>
-    <h1>Nur Umut Kürkü<br>Temizlik ve Hijyen</h1>
-    <p class="tagline">İşletmeler için temizlik ve hijyen malzemesi tedariki.<br>Verdiğimiz, aldığımız, bekleyen — tek yerden.</p>
-    <button id="loginTrigger" class="login-trigger" title="Giriş yap" aria-label="Giriş yap">
-      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M12 2C9 6 7 9 7 12.5C7 15.5 9.2 18 12 18C14.8 18 17 15.5 17 12.5C17 9 15 6 12 2Z" stroke="#5A3A0A" stroke-width="1.6" fill="rgba(255,255,255,0.25)"/>
-        <path d="M10.5 20H13.5" stroke="#5A3A0A" stroke-width="1.6" stroke-linecap="round"/>
-      </svg>
+    <button id="loginTrigger" class="landing-title-trigger" title="Giriş yap" aria-label="Giriş yap">
+      <div class="brand-badge">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2C9 6 7 9 7 12.5C7 15.5 9.2 18 12 18C14.8 18 17 15.5 17 12.5C17 9 15 6 12 2Z" stroke="#0E3B36" stroke-width="1.6" fill="#F0BE6B"/>
+        </svg>
+      </div>
+      <h1>Nur Umut Kürkü<br>Temizlik ve Hijyen</h1>
+      <span class="title-underline"></span>
     </button>
-    <div class="login-hint">giriş için tıkla</div>
+    <div class="login-hint">giriş için yazıya tıkla</div>
   </div>
 </div>
 
@@ -93,9 +98,11 @@
     <nav>
       <div class="nav-item" data-view="dashboard">Panel</div>
       <div class="nav-item" data-view="siparis">Sipariş Oluştur</div>
+      <div class="nav-item" data-view="siparisler">Siparişler</div>
       <div class="nav-item" data-view="isletmeler">İşletmeler</div>
       <div class="nav-item" data-view="urunler">Ürünler</div>
       <div class="nav-item" data-view="stok">Stok</div>
+      <div class="nav-item" data-view="ayarlar">Ayarlar</div>
     </nav>
     <div class="sidebar-footer">
       <div class="sidebar-user" id="sidebarUser"></div>

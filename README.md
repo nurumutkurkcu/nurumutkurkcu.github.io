@@ -34,3 +34,19 @@ manifest.json, sw.js, icon-*.png -> telefona/bilgisayara "uygulama" olarak kurul
 - **Android (Chrome):** siteyi aç → sağ üst ⋮ → "Uygulamayı yükle"
 - **iPhone (Safari):** siteyi aç → Paylaş ikonu → "Ana Ekrana Ekle"
 - **Bilgisayar (Chrome/Edge):** adres çubuğunun sağındaki kurulum ikonu
+
+## Bu sürümde eklenenler
+- **Sipariş Oluştur:** İşletme ve ürün alanları artık tek kutu — listeden seç
+  ya da yeni bir ad yaz, otomatik kaydedilir (işletme → İşletmeler'e, ürün →
+  Ürünler'e düşer).
+- **Siparişler sayfası:** Tüm siparişlerin listesi, arama/filtre, her biri için
+  Yazdır/İndir ve Sil.
+- **Silme:** Ürün, işletme ve sipariş için silme butonları — hepsi onay ister.
+- **Stok:** Artık tüm ürünler görünür, istediğin ürün için stok takibini
+  buradan açabilirsin.
+- **Panel:** "Kimden alacağım / Kime borçluyum" dökümü eklendi.
+- **Ayarlar:** Yeni kullanıcı ekleme ekranı (kullanıcı adı + şifre).
+
+Bu değişiklikler sadece `index.html`, `app.js`, `style.css` ve `sw.js`
+dosyalarında — GitHub'a yüklerken bu 4 dosyanın üzerine yazman yeterli,
+diğerlerine (manifest.json, icon'lar, firestore.rules) dokunmana gerek yok.

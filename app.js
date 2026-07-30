@@ -31,7 +31,23 @@
     if (c === 'auth/wrong-password' || c === 'auth/user-not-found' || c === 'auth/invalid-credential' || c === 'auth/invalid-login-credentials') {
       return 'Kullanıcı adı veya şifre hatalı';
     }
-    return 'Giriş yapılamadı: ' + (err && err.message ? err.message : 'bilinmeyen hata');
+    if (c === 'auth/email-already-in-use') return 'Bu kullanıcı adı zaten kayıtlı';
+    if (c === 'auth/weak-password') return 'Şifre en az 6 karakter olmalı';
+    return 'İşlem yapılamadı: ' + (err && err.message ? err.message : 'bilinmeyen hata');
+  }
+  function confirmDialog(message) {
+    return new Promise((resolve) => {
+      const host = document.createElement('div');
+      host.className = 'confirm-backdrop';
+      host.innerHTML = `<div class="confirm-box"><p>${esc(message)}</p><div class="row">
+        <button class="btn btn-ghost btn-block" id="confirmNo">Vazgeç</button>
+        <button class="btn btn-danger btn-block" id="confirmYes">Evet, sil</button>
+      </div></div>`;
+      document.body.appendChild(host);
+      host.querySelector('#confirmNo').addEventListener('click', () => { host.remove(); resolve(false); });
+      host.querySelector('#confirmYes').addEventListener('click', () => { host.remove(); resolve(true); });
+      host.addEventListener('click', (e) => { if (e.target === host) { host.remove(); resolve(false); } });
+    });
   }
 
   // ================= FIRESTORE VERİ KATMANI =================
@@ -53,6 +69,9 @@
   }
   async function fsUpdateUrun(id, payload) {
     await col.urunler.doc(id).update(payload);
+  }
+  async function fsDeleteUrun(id) {
+    await col.urunler.doc(id).delete();
   }
 
   async function fsGetAllSiparisler() {
@@ -80,6 +99,9 @@
     const ref = await col.isletmeler.add(data);
     return { id: ref.id, ...data };
   }
+  async function fsDeleteIsletme(id) {
+    await col.isletmeler.doc(id).delete();
+  }
   async function fsGetIsletmeDetay(id) {
     const [isletmeSnap, siparislerSnap] = await Promise.all([
       col.isletmeler.doc(id).get(),
@@ -94,12 +116,13 @@
   }
 
   async function fsGetStok() {
-    const snap = await col.urunler.where('stokTakibi', '==', true).get();
+    const snap = await col.urunler.orderBy('ad').get();
     return snap.docs.map(d => {
       const u = d.data();
       return {
-        id: d.id, ad: u.ad, birim: u.birim, stokAdedi: u.stokAdedi, kritikStok: u.kritikStok,
-        kritikMi: u.stokAdedi != null && u.kritikStok != null && u.stokAdedi <= u.kritikStok
+        id: d.id, ad: u.ad, birim: u.birim, stokTakibi: !!u.stokTakibi,
+        stokAdedi: u.stokAdedi, kritikStok: u.kritikStok,
+        kritikMi: u.stokTakibi && u.stokAdedi != null && u.kritikStok != null && u.stokAdedi <= u.kritikStok
       };
     });
   }
@@ -137,6 +160,7 @@
         odemeTuru: payload.odemeTuru,
         odenenTutar: payload.odenenTutar,
         notlar: payload.notlar || '',
+        olusturanKullanici: payload.olusturanKullanici || '',
         siraNo: yeniNo,
         olusturmaTarihi: new Date().toISOString()
       };
@@ -155,21 +179,53 @@
     });
   }
 
+  async function fsDeleteSiparis(siparis) {
+    return db.runTransaction(async (tx) => {
+      const urunSnaps = [];
+      for (const k of siparis.kalemler) {
+        if (!k.urunId) continue;
+        const ref = col.urunler.doc(k.urunId);
+        const snap = await tx.get(ref);
+        urunSnaps.push({ ref, snap, kalem: k });
+      }
+      tx.delete(col.siparisler.doc(siparis.id));
+      for (const u of urunSnaps) {
+        if (!u.snap.exists) continue;
+        const d = u.snap.data();
+        if (d.stokTakibi && d.stokAdedi != null) {
+          const geriAlinan = round2(d.stokAdedi + (siparis.tur === 'alis' ? -u.kalem.adet : u.kalem.adet));
+          tx.update(u.ref, { stokAdedi: geriAlinan });
+        }
+      }
+    });
+  }
+
+  async function fsAddUser(username, password) {
+    const email = username.trim().toLowerCase() + EMAIL_DOMAIN;
+    await secondaryAuth.createUserWithEmailAndPassword(email, password);
+    await secondaryAuth.signOut();
+  }
+
   async function fsGetDashboard() {
     const [isletmelerSnap, siparisler, urunler] = await Promise.all([
       col.isletmeler.get(), fsGetAllSiparisler(), fsGetUrunler()
     ]);
     let toplamAlacak = 0, toplamBorc = 0;
+    const isletmeBakiyeleri = [];
     for (const d of isletmelerSnap.docs) {
       const b = isletmeBakiyeHesapla(siparisler, d.id);
-      if (b > 0) toplamAlacak += b; else toplamBorc += -b;
+      if (b > 0) toplamAlacak += b; else if (b < 0) toplamBorc += -b;
+      if (b !== 0) isletmeBakiyeleri.push({ ad: d.data().ad, bakiye: b });
     }
+    isletmeBakiyeleri.sort((a, b) => Math.abs(b.bakiye) - Math.abs(a.bakiye));
     const sonSiparisler = [...siparisler].sort((a, b) => (a.tarih < b.tarih ? 1 : -1)).slice(0, 8);
     const kritikStoklar = urunler.filter(u => u.stokTakibi && u.stokAdedi != null && u.kritikStok != null && u.stokAdedi <= u.kritikStok);
     return {
       toplamAlacak: round2(toplamAlacak), toplamBorc: round2(toplamBorc),
       isletmeSayisi: isletmelerSnap.size, urunSayisi: urunler.length,
-      sonSiparisler, kritikStoklar
+      sonSiparisler, kritikStoklar,
+      alacaklarim: isletmeBakiyeleri.filter(i => i.bakiye > 0),
+      borclarim: isletmeBakiyeleri.filter(i => i.bakiye < 0)
     };
   }
 
@@ -313,9 +369,11 @@
   async function render() {
     if (state.view === 'dashboard') return renderDashboard();
     if (state.view === 'siparis') return renderSiparisOlustur();
+    if (state.view === 'siparisler') return renderSiparisler();
     if (state.view === 'isletmeler') return renderIsletmeler();
     if (state.view === 'urunler') return renderUrunler();
     if (state.view === 'stok') return renderStok();
+    if (state.view === 'ayarlar') return renderAyarlar();
   }
 
   // ================= PANEL =================
@@ -330,6 +388,20 @@
         <div class="card stat-card negative"><div class="label">Toplam Borcum</div><div class="value mono">${money(d.toplamBorc)}</div></div>
         <div class="card stat-card"><div class="label">Kayıtlı İşletme</div><div class="value">${d.isletmeSayisi}</div></div>
         <div class="card stat-card"><div class="label">Kayıtlı Ürün</div><div class="value">${d.urunSayisi}</div></div>
+      </div>
+      <div class="grid grid-2 mt-4">
+        <div class="card">
+          <h3 style="font-size:15px; margin-bottom:12px; color:var(--teal-700);">Kimden Alacağım</h3>
+          ${d.alacaklarim.length ? `<table><tbody>
+            ${d.alacaklarim.map(i => `<tr><td>${esc(i.ad)}</td><td class="text-right mono">${money(i.bakiye)}</td></tr>`).join('')}
+          </tbody></table>` : `<div class="empty-state">Alacağın görünmüyor.</div>`}
+        </div>
+        <div class="card">
+          <h3 style="font-size:15px; margin-bottom:12px; color:var(--danger);">Kime Borçluyum</h3>
+          ${d.borclarim.length ? `<table><tbody>
+            ${d.borclarim.map(i => `<tr><td>${esc(i.ad)}</td><td class="text-right mono">${money(Math.abs(i.bakiye))}</td></tr>`).join('')}
+          </tbody></table>` : `<div class="empty-state">Borcun görünmüyor.</div>`}
+        </div>
       </div>
       <div class="grid grid-2 mt-4">
         <div class="card">
@@ -355,17 +427,11 @@
         <div class="grid grid-2">
           <div class="field">
             <label>İşletme</label>
-            <select id="sipIsletme">
-              <option value="">— seçiniz —</option>
-              ${state.isletmeler.map(i => `<option value="${i.id}">${esc(i.ad)}</option>`).join('')}
-            </select>
+            <input type="text" id="sipIsletme" list="isletmeListesi" placeholder="Mevcut işletmeyi seç ya da yeni ad yaz" autocomplete="off">
+            <datalist id="isletmeListesi">
+              ${state.isletmeler.map(i => `<option value="${esc(i.ad)}">`).join('')}
+            </datalist>
           </div>
-          <div class="field">
-            <label>Yeni işletme ekle</label>
-            <input type="text" id="yeniIsletmeAd" placeholder="İşletme adı yazıp Enter'a bas">
-          </div>
-        </div>
-        <div class="grid grid-2">
           <div class="field">
             <label>Sipariş türü</label>
             <select id="sipTur">
@@ -373,13 +439,16 @@
               <option value="alis">Alış (ben alıyorum)</option>
             </select>
           </div>
-          <div class="field">
-            <label>Tarih</label>
-            <input type="date" id="sipTarih" value="${todayISO()}">
-          </div>
+        </div>
+        <div class="field" style="max-width:220px;">
+          <label>Tarih</label>
+          <input type="date" id="sipTarih" value="${todayISO()}">
         </div>
 
         <h3 style="font-size:14px; margin:18px 0 10px;">Kalemler</h3>
+        <datalist id="urunListesi">
+          ${state.urunler.map(u => `<option value="${esc(u.ad)}">`).join('')}
+        </datalist>
         <div id="kalemList"></div>
         <button id="kalemEkleBtn" type="button" class="btn btn-ghost btn-sm">+ Kalem ekle</button>
 
@@ -428,11 +497,7 @@
       row.className = 'line-item-row';
       row.id = rid;
       row.innerHTML = `
-        <select class="k-urun">
-          <option value="">— ürün seç veya elle yaz —</option>
-          ${state.urunler.map(u => `<option value="${u.id}" data-fiyat="${u.satisFiyati}" data-kdv="${u.kdvOrani}" data-birim="${esc(u.birim)}">${esc(u.ad)}</option>`).join('')}
-        </select>
-        <input class="k-ad-manuel hidden" type="text" placeholder="Ürün adı">
+        <input class="k-urun-ad" type="text" list="urunListesi" placeholder="Ürün adı (seç ya da yaz)" autocomplete="off">
         <input class="k-adet" type="number" step="0.01" placeholder="Adet" value="1">
         <input class="k-kdv" type="number" placeholder="KDV%" value="20">
         <input class="k-fiyat" type="number" step="0.01" placeholder="Birim fiyat">
@@ -440,17 +505,16 @@
       `;
       kalemList.appendChild(row);
 
-      const sel = row.querySelector('.k-urun');
-      const manuelAd = row.querySelector('.k-ad-manuel');
+      const adInput = row.querySelector('.k-urun-ad');
       const fiyatInput = row.querySelector('.k-fiyat');
       const kdvInput = row.querySelector('.k-kdv');
-      sel.addEventListener('change', () => {
-        if (sel.value === '') { manuelAd.classList.remove('hidden'); return; }
-        manuelAd.classList.add('hidden');
-        const opt = sel.selectedOptions[0];
-        fiyatInput.value = opt.dataset.fiyat;
-        kdvInput.value = opt.dataset.kdv;
-        toplamGuncelle();
+      adInput.addEventListener('input', () => {
+        const eslesen = state.urunler.find(u => u.ad.toLowerCase() === adInput.value.trim().toLowerCase());
+        if (eslesen) {
+          fiyatInput.value = eslesen.satisFiyati;
+          kdvInput.value = eslesen.kdvOrani;
+          toplamGuncelle();
+        }
       });
       row.querySelectorAll('input').forEach(inp => inp.addEventListener('input', toplamGuncelle));
       row.querySelector('.icon-btn').addEventListener('click', () => { row.remove(); toplamGuncelle(); });
@@ -479,62 +543,140 @@
       document.getElementById('sipOdemeDiger').classList.toggle('hidden', e.target.value !== 'diger');
     });
 
-    document.getElementById('yeniIsletmeAd').addEventListener('keydown', async (e) => {
-      if (e.key !== 'Enter') return;
-      e.preventDefault();
-      const ad = e.target.value.trim();
-      if (!ad) return;
-      try {
-        const isl = await fsAddIsletme({ ad, telefon: '', adres: '', vergiNo: '', notlar: '' });
-        state.isletmeler.push(isl);
-        const sel = document.getElementById('sipIsletme');
-        const opt = document.createElement('option');
-        opt.value = isl.id; opt.textContent = isl.ad; opt.selected = true;
-        sel.appendChild(opt);
-        e.target.value = '';
-        toast('İşletme eklendi: ' + isl.ad);
-      } catch (err) { toast(err.message, true); }
-    });
-
     document.getElementById('sipKaydetBtn').addEventListener('click', async () => {
-      const isletmeId = document.getElementById('sipIsletme').value;
-      if (!isletmeId) return toast('Lütfen işletme seçin', true);
-      const kalemler = [];
+      const btn = document.getElementById('sipKaydetBtn');
+      const isletmeAdiGirilen = document.getElementById('sipIsletme').value.trim();
+      if (!isletmeAdiGirilen) return toast('Lütfen işletme adı girin', true);
+
+      const satirlar = [];
       kalemList.querySelectorAll('.line-item-row').forEach(row => {
-        const sel = row.querySelector('.k-urun');
-        const manuelAd = row.querySelector('.k-ad-manuel').value.trim();
-        const urunId = sel.value || null;
-        const urunAdi = urunId ? sel.selectedOptions[0].textContent : manuelAd;
+        const ad = row.querySelector('.k-urun-ad').value.trim();
         const adet = Number(row.querySelector('.k-adet').value) || 0;
         const fiyat = Number(row.querySelector('.k-fiyat').value) || 0;
         const kdv = Number(row.querySelector('.k-kdv').value) || 0;
-        if (!urunAdi || adet <= 0) return;
-        kalemler.push({ urunId, urunAdi, adet, birimFiyat: fiyat, kdvOrani: kdv, tutar: round2(adet * fiyat) });
+        if (!ad || adet <= 0) return;
+        satirlar.push({ ad, adet, fiyat, kdv });
       });
-      if (kalemler.length === 0) return toast('En az bir geçerli kalem ekleyin', true);
+      if (satirlar.length === 0) return toast('En az bir geçerli kalem ekleyin', true);
 
-      let odemeTuru = document.getElementById('sipOdemeTuru').value;
-      if (odemeTuru === 'diger') odemeTuru = document.getElementById('sipOdemeDiger').value.trim() || 'Diğer';
-
-      const manuelToplam = document.getElementById('sipManuelToplam').value;
-      const hesaplananToplam = round2(kalemler.reduce((t, k) => t + k.tutar, 0));
-      const payload = {
-        isletmeId,
-        tur: document.getElementById('sipTur').value === 'alis' ? 'alis' : 'satis',
-        tarih: document.getElementById('sipTarih').value || todayISO(),
-        kalemler,
-        toplamTutar: manuelToplam !== '' ? round2(Number(manuelToplam)) : hesaplananToplam,
-        odemeTuru,
-        odenenTutar: round2(Number(document.getElementById('sipOdenen').value) || 0),
-        notlar: document.getElementById('sipNot').value
-      };
+      btn.disabled = true;
       try {
+        // İşletme: varsa kullan, yoksa otomatik oluştur
+        let isletme = state.isletmeler.find(i => i.ad.toLowerCase() === isletmeAdiGirilen.toLowerCase());
+        if (!isletme) {
+          isletme = await fsAddIsletme({ ad: isletmeAdiGirilen, telefon: '', adres: '', vergiNo: '', notlar: '' });
+          state.isletmeler.push(isletme);
+          toast('Yeni işletme kaydedildi: ' + isletme.ad);
+        }
+
+        // Kalemler: eşleşen ürünü kullan, yoksa otomatik ürün olarak kaydet
+        const kalemler = [];
+        for (const satir of satirlar) {
+          let urun = state.urunler.find(u => u.ad.toLowerCase() === satir.ad.toLowerCase());
+          if (!urun) {
+            urun = await fsAddUrun({
+              ad: satir.ad, kategori: '', birim: 'adet',
+              satisFiyati: satir.fiyat, kdvOrani: satir.kdv,
+              stokTakibi: false, stokAdedi: null, kritikStok: null
+            });
+            state.urunler.push(urun);
+            toast('Yeni ürün kaydedildi: ' + urun.ad);
+          }
+          kalemler.push({
+            urunId: urun.id, urunAdi: satir.ad, adet: satir.adet,
+            birimFiyat: satir.fiyat, kdvOrani: satir.kdv, tutar: round2(satir.adet * satir.fiyat)
+          });
+        }
+
+        let odemeTuru = document.getElementById('sipOdemeTuru').value;
+        if (odemeTuru === 'diger') odemeTuru = document.getElementById('sipOdemeDiger').value.trim() || 'Diğer';
+
+        const manuelToplam = document.getElementById('sipManuelToplam').value;
+        const hesaplananToplam = round2(kalemler.reduce((t, k) => t + k.tutar, 0));
+        const payload = {
+          isletmeId: isletme.id,
+          tur: document.getElementById('sipTur').value === 'alis' ? 'alis' : 'satis',
+          tarih: document.getElementById('sipTarih').value || todayISO(),
+          kalemler,
+          toplamTutar: manuelToplam !== '' ? round2(Number(manuelToplam)) : hesaplananToplam,
+          odemeTuru,
+          odenenTutar: round2(Number(document.getElementById('sipOdenen').value) || 0),
+          notlar: document.getElementById('sipNot').value,
+          olusturanKullanici: state.username || ''
+        };
         const sip = await fsAddSiparis(payload);
         toast('Sipariş kaydedildi (No: ' + sip.siraNo + ')');
         await refreshLookups();
-        setView('dashboard');
-      } catch (err) { toast(err.message, true); }
+        setView('siparisler');
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        btn.disabled = false;
+      }
     });
+  }
+
+  // ================= SİPARİŞLER =================
+  async function renderSiparisler() {
+    main.innerHTML = `
+      <div class="page-header"><div><h1>Siparişler</h1><div class="sub">Oluşturduğun tüm siparişler — yazdır, indir veya sil</div></div></div>
+      <div class="toolbar">
+        <input type="text" id="sipArama" placeholder="İşletme adı veya sipariş no ile ara">
+        <select id="sipTurFiltre">
+          <option value="">Tüm türler</option>
+          <option value="satis">Satış</option>
+          <option value="alis">Alış</option>
+        </select>
+      </div>
+      <div id="siparisListesi">Yükleniyor…</div>`;
+
+    let tumu;
+    try { tumu = await fsGetAllSiparisler(); } catch (err) { return toast(err.message, true); }
+    tumu.sort((a, b) => (a.tarih < b.tarih ? 1 : (a.tarih > b.tarih ? -1 : (b.siraNo || 0) - (a.siraNo || 0))));
+
+    function ciz(liste) {
+      const host = document.getElementById('siparisListesi');
+      if (!liste.length) { host.innerHTML = `<div class="empty-state">Kayıtlı sipariş yok.</div>`; return; }
+      host.innerHTML = liste.map(s => `
+        <div class="order-card">
+          <div class="oc-main">
+            <div class="oc-isletme">${esc(s.isletmeAdi)} <span class="badge badge-${s.tur}">${s.tur === 'satis' ? 'Satış' : 'Alış'}</span></div>
+            <div class="oc-meta">#${s.siraNo} · ${s.tarih} · ${esc(s.olusturanKullanici || 'bilinmiyor')} tarafından oluşturuldu · ${s.kalemler.length} kalem ürün</div>
+          </div>
+          <div class="oc-tutar mono">${money(s.toplamTutar)}</div>
+          <div class="oc-actions">
+            <button class="btn btn-ghost btn-sm" data-pdf="${s.id}">Yazdır / İndir</button>
+            <button class="btn btn-danger btn-sm" data-sil="${s.id}">Sil</button>
+          </div>
+        </div>`).join('');
+
+      host.querySelectorAll('button[data-pdf]').forEach(btn => btn.addEventListener('click', async () => {
+        const s = liste.find(x => x.id === btn.dataset.pdf);
+        try { await irsaliyePdfOlusturVeAc(s); } catch (err) { toast('PDF oluşturulamadı: ' + err.message, true); }
+      }));
+      host.querySelectorAll('button[data-sil]').forEach(btn => btn.addEventListener('click', async () => {
+        const ok = await confirmDialog('Bu siparişi silmek istediğine emin misin? Bu işlem geri alınamaz ve stok/cari üzerindeki etkisi geri alınır.');
+        if (!ok) return;
+        const s = liste.find(x => x.id === btn.dataset.sil);
+        try {
+          await fsDeleteSiparis(s);
+          toast('Sipariş silindi');
+          renderSiparisler();
+        } catch (err) { toast(err.message, true); }
+      }));
+    }
+    ciz(tumu);
+
+    function filtrele() {
+      const q = document.getElementById('sipArama').value.trim().toLowerCase();
+      const tur = document.getElementById('sipTurFiltre').value;
+      let liste = tumu;
+      if (tur) liste = liste.filter(s => s.tur === tur);
+      if (q) liste = liste.filter(s => (s.isletmeAdi || '').toLowerCase().includes(q) || String(s.siraNo).includes(q));
+      ciz(liste);
+    }
+    document.getElementById('sipArama').addEventListener('input', filtrele);
+    document.getElementById('sipTurFiltre').addEventListener('change', filtrele);
   }
 
   // ================= İŞLETMELER =================
@@ -542,7 +684,7 @@
     main.innerHTML = `
       <div class="page-header"><div><h1>İşletmeler</h1><div class="sub">Ürün verdiğin / aldığın işletmeler ve cari bakiyeleri</div></div>
         <button id="yeniIsletmeBtn" class="btn btn-amber">+ Yeni İşletme</button></div>
-      <div class="card"><table><thead><tr><th>İşletme</th><th>Telefon</th><th class="text-right">Bakiye</th></tr></thead>
+      <div class="card"><table><thead><tr><th>İşletme</th><th>Telefon</th><th class="text-right">Bakiye</th><th></th></tr></thead>
       <tbody id="islTbody"></tbody></table></div>
       <div id="islDetay" class="card mt-4 hidden"></div>`;
 
@@ -550,15 +692,27 @@
     state.isletmeler = isletmeler;
     const tbody = document.getElementById('islTbody');
     if (isletmeler.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="3"><div class="empty-state">Henüz işletme kaydı yok.</div></td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state">Henüz işletme kaydı yok.</div></td></tr>`;
     } else {
       tbody.innerHTML = isletmeler.map(i => `
         <tr class="clickable" data-id="${i.id}">
           <td>${esc(i.ad)}</td>
           <td>${esc(i.telefon || '—')}</td>
           <td class="text-right mono" style="color:${i.bakiye > 0 ? 'var(--teal-700)' : i.bakiye < 0 ? 'var(--danger)' : 'inherit'}">${i.bakiye > 0 ? 'Alacaklıyım ' : i.bakiye < 0 ? 'Borçluyum ' : ''}${money(Math.abs(i.bakiye))}</td>
+          <td class="text-right"><button class="btn btn-danger btn-sm" data-sil="${i.id}">Sil</button></td>
         </tr>`).join('');
-      tbody.querySelectorAll('tr[data-id]').forEach(tr => tr.addEventListener('click', () => isletmeDetay(tr.dataset.id)));
+      tbody.querySelectorAll('tr[data-id]').forEach(tr => tr.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        isletmeDetay(tr.dataset.id);
+      }));
+      tbody.querySelectorAll('button[data-sil]').forEach(btn => btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const isl = isletmeler.find(x => x.id === btn.dataset.sil);
+        const ok = await confirmDialog(`"${isl.ad}" işletmesini silmek istediğine emin misin? Geçmiş siparişleri etkilemez ama listeden kaybolur.`);
+        if (!ok) return;
+        try { await fsDeleteIsletme(btn.dataset.sil); toast('İşletme silindi'); renderIsletmeler(); }
+        catch (err) { toast(err.message, true); }
+      }));
     }
 
     document.getElementById('yeniIsletmeBtn').addEventListener('click', async () => {
@@ -607,7 +761,7 @@
     main.innerHTML = `
       <div class="page-header"><div><h1>Ürünler</h1><div class="sub">Ürün listesi — siparişte hem buradan seçilir hem yeni eklenir</div></div>
         <button id="yeniUrunBtn" class="btn btn-amber">+ Yeni Ürün</button></div>
-      <div class="card"><table><thead><tr><th>Ürün</th><th>Kategori</th><th>Birim</th><th class="text-right">Satış Fiyatı (KDV Dahil)</th><th class="text-right">KDV %</th><th>Stok Takibi</th></tr></thead>
+      <div class="card"><table><thead><tr><th>Ürün</th><th>Kategori</th><th>Birim</th><th class="text-right">Satış Fiyatı (KDV Dahil)</th><th class="text-right">KDV %</th><th>Stok Takibi</th><th></th></tr></thead>
       <tbody id="urunTbody"></tbody></table></div>
       <div id="urunForm" class="card mt-4 hidden"></div>`;
 
@@ -620,7 +774,16 @@
         <td class="text-right mono">${money(u.satisFiyati)}</td>
         <td class="text-right mono">%${u.kdvOrani}</td>
         <td>${u.stokTakibi ? '<span class="badge badge-ok">Açık</span>' : '—'}</td>
-      </tr>`).join('') : `<tr><td colspan="6"><div class="empty-state">Henüz ürün eklenmedi.</div></td></tr>`;
+        <td class="text-right"><button class="btn btn-danger btn-sm" data-sil="${u.id}">Sil</button></td>
+      </tr>`).join('') : `<tr><td colspan="7"><div class="empty-state">Henüz ürün eklenmedi.</div></td></tr>`;
+
+    tbody.querySelectorAll('button[data-sil]').forEach(btn => btn.addEventListener('click', async () => {
+      const u = urunler.find(x => x.id === btn.dataset.sil);
+      const ok = await confirmDialog(`"${u.ad}" ürününü silmek istediğine emin misin?`);
+      if (!ok) return;
+      try { await fsDeleteUrun(btn.dataset.sil); toast('Ürün silindi'); renderUrunler(); }
+      catch (err) { toast(err.message, true); }
+    }));
 
     document.getElementById('yeniUrunBtn').addEventListener('click', () => {
       const box = document.getElementById('urunForm');
@@ -668,7 +831,7 @@
   // ================= STOK =================
   async function renderStok() {
     main.innerHTML = `
-      <div class="page-header"><div><h1>Stok</h1><div class="sub">Sadece stok takibi açık ürünler listelenir — veri girmediğin ürünler burada görünmez</div></div></div>
+      <div class="page-header"><div><h1>Stok</h1><div class="sub">Tüm ürünler burada — istediğin ürün için stok takibini açıp adet girebilirsin</div></div></div>
       <div class="card"><table><thead><tr><th>Ürün</th><th class="text-right">Mevcut</th><th class="text-right">Kritik Seviye</th><th>Durum</th><th></th></tr></thead>
       <tbody id="stokTbody"></tbody></table></div>`;
 
@@ -677,21 +840,71 @@
     tbody.innerHTML = stok.length ? stok.map(u => `
       <tr>
         <td>${esc(u.ad)}</td>
-        <td class="text-right mono">${u.stokAdedi != null ? u.stokAdedi : '—'}</td>
-        <td class="text-right mono">${u.kritikStok != null ? u.kritikStok : '—'}</td>
-        <td>${u.kritikMi ? '<span class="badge badge-kritik">Kritik</span>' : '<span class="badge badge-ok">Yeterli</span>'}</td>
-        <td><button class="btn btn-ghost btn-sm" data-id="${u.id}" data-cur="${u.stokAdedi ?? ''}">Güncelle</button></td>
-      </tr>`).join('') : `<tr><td colspan="5"><div class="empty-state">Stok takibi açık ürün yok. Ürün eklerken "stok takibi" seçeneğini işaretleyebilirsin.</div></td></tr>`;
+        <td class="text-right mono">${u.stokTakibi && u.stokAdedi != null ? u.stokAdedi : '—'}</td>
+        <td class="text-right mono">${u.stokTakibi && u.kritikStok != null ? u.kritikStok : '—'}</td>
+        <td>${!u.stokTakibi ? '<span class="badge">Takip kapalı</span>' : (u.kritikMi ? '<span class="badge badge-kritik">Kritik</span>' : '<span class="badge badge-ok">Yeterli</span>')}</td>
+        <td>${u.stokTakibi
+          ? `<button class="btn btn-ghost btn-sm" data-guncelle="${u.id}" data-cur="${u.stokAdedi ?? ''}">Güncelle</button>`
+          : `<button class="btn btn-amber btn-sm" data-ac="${u.id}">Stok takibini aç</button>`}</td>
+      </tr>`).join('') : `<tr><td colspan="5"><div class="empty-state">Henüz ürün eklenmedi.</div></td></tr>`;
 
-    tbody.querySelectorAll('button[data-id]').forEach(btn => btn.addEventListener('click', async () => {
+    tbody.querySelectorAll('button[data-guncelle]').forEach(btn => btn.addEventListener('click', async () => {
       const yeni = prompt('Yeni stok adedi:', btn.dataset.cur);
       if (yeni === null) return;
       try {
-        await fsUpdateStok(btn.dataset.id, { stokAdedi: Number(yeni) });
+        await fsUpdateStok(btn.dataset.guncelle, { stokAdedi: Number(yeni) });
         toast('Stok güncellendi');
         renderStok();
       } catch (err) { toast(err.message, true); }
     }));
+    tbody.querySelectorAll('button[data-ac]').forEach(btn => btn.addEventListener('click', async () => {
+      const adet = prompt('Başlangıç stok adedi:', '0');
+      if (adet === null) return;
+      const kritik = prompt('Kritik stok seviyesi (bu adedin altına inince uyarı gösterilsin):', '0');
+      if (kritik === null) return;
+      try {
+        await fsUpdateStok(btn.dataset.ac, { stokTakibi: true, stokAdedi: Number(adet) || 0, kritikStok: Number(kritik) || 0 });
+        toast('Stok takibi açıldı');
+        renderStok();
+      } catch (err) { toast(err.message, true); }
+    }));
+  }
+
+  // ================= AYARLAR =================
+  function renderAyarlar() {
+    main.innerHTML = `
+      <div class="page-header"><div><h1>Ayarlar</h1><div class="sub">Sisteme yeni kullanıcı ekle</div></div></div>
+      <div class="card" style="max-width:420px;">
+        <h3 style="font-size:15px; margin-bottom:14px;">Yeni Kullanıcı Ekle</h3>
+        <div class="field">
+          <label>Kullanıcı adı</label>
+          <input type="text" id="ayarKullaniciAdi" placeholder="örn. Ayşe" autocomplete="off">
+        </div>
+        <div class="field">
+          <label>Şifre</label>
+          <input type="password" id="ayarSifre" placeholder="En az 6 karakter">
+        </div>
+        <button id="ayarEkleBtn" class="btn btn-primary">Kullanıcı Ekle</button>
+        <p class="sub" style="color:var(--ink-soft); font-size:12px; margin-top:14px;">
+          Yeni kullanıcı, kendi kullanıcı adı ve şifresiyle giriş yapabilir. Kullanıcıları
+          silmek veya listelemek için Firebase Console → Authentication → Users
+          sayfasını kullanman gerekiyor (bu ekrandan yönetilemiyor).
+        </p>
+      </div>`;
+
+    document.getElementById('ayarEkleBtn').addEventListener('click', async () => {
+      const uname = document.getElementById('ayarKullaniciAdi').value.trim();
+      const pass = document.getElementById('ayarSifre').value;
+      if (!uname || !pass) return toast('Kullanıcı adı ve şifre gerekli', true);
+      try {
+        await fsAddUser(uname, pass);
+        toast('Kullanıcı eklendi: ' + uname);
+        document.getElementById('ayarKullaniciAdi').value = '';
+        document.getElementById('ayarSifre').value = '';
+      } catch (err) {
+        toast(friendlyAuthError(err), true);
+      }
+    });
   }
 
 })();
