@@ -25,13 +25,27 @@
   // === BURAYI DOLDUR ===
   // Firebase Console → Project Settings → General → "Your apps" → Web app
   // bölümünden kopyalayacağın ayarlar. README'de adım adım anlatılıyor.
-  const firebaseConfig = {
-    apiKey: "BURAYA_YAZ",
-    authDomain: "BURAYA_YAZ.firebaseapp.com",
-    projectId: "BURAYA_YAZ",
-    storageBucket: "BURAYA_YAZ.firebasestorage.app",
-    messagingSenderId: "BURAYA_YAZ",
-    appId: "BURAYA_YAZ"
+  // Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyCf-rs-7on64Ii0r2FHPAxwepZo85hVaOM",
+  authDomain: "nurumutkurkucu.firebaseapp.com",
+  projectId: "nurumutkurkucu",
+  storageBucket: "nurumutkurkucu.firebasestorage.app",
+  messagingSenderId: "769584225558",
+  appId: "1:769584225558:web:549dcc6d5e013a44378437",
+  measurementId: "G-L02D91WF07"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
   };
   const firebaseApp = firebase.initializeApp(firebaseConfig);
   const auth = firebase.auth();
