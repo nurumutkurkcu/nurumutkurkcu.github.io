@@ -50,3 +50,19 @@ manifest.json, sw.js, icon-*.png -> telefona/bilgisayara "uygulama" olarak kurul
 Bu değişiklikler sadece `index.html`, `app.js`, `style.css` ve `sw.js`
 dosyalarında — GitHub'a yüklerken bu 4 dosyanın üzerine yazman yeterli,
 diğerlerine (manifest.json, icon'lar, firestore.rules) dokunmana gerek yok.
+
+## Bu sürümde eklenenler (2. güncelleme)
+- **Birim yönetimi:** Sipariş kalemlerinde artık birim seçilebiliyor (koli,
+  galon, paket, bidon + istediğin yenisini yazınca otomatik kaydediliyor).
+- **Siparişler sayfası artık akordeon:** Satıra tıklayınca detaylar
+  (kalemler, ödeme, teslimat) aşağı açılıyor. CSV olarak dışa aktarma eklendi.
+- **Yaklaşık Dağıt:** Toplam tutarı bildiğin ama kalem bazında tam fiyatı
+  bilmediğin siparişlerde, kalemleri "Yklş" işaretleyip tahmini fiyat
+  gir — sistem adet ve birim fiyatı, toplamı hiç aşmayacak şekilde
+  otomatik hesaplar.
+- **Teslimat durumu:** Her siparişte "Teslim edildi / Bekliyor" durumu,
+  Panel'de "Teslimat Bekleyen Siparişler" listesi.
+- **Ürün ve İşletme düzenleme:** Artık kayıtlı ürün/işletme bilgilerini
+  (fiyat, telefon, adres vb.) sonradan değiştirebiliyorsun.
+- **Ayarlar genişledi:** Firma bilgileri, birim listesi ve ödeme türü
+  listesi buradan yönetiliyor.
