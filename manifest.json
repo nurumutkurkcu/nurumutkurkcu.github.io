@@ -1,0 +1,17 @@
+{
+  "name": "Nur Umut Kürkü Temizlik ve Hijyen",
+  "short_name": "Nur Umut",
+  "description": "Sipariş, cari ve stok takip sistemi",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#F3F7F1",
+  "theme_color": "#0E3B36",
+  "lang": "tr",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
