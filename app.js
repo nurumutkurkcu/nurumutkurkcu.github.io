@@ -35,6 +35,7 @@
   }
   function round2(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
   function floor2(n) { return Math.floor(n * 100) / 100; }
+  function ceil2(n) { return Math.ceil(n * 100) / 100; }
   function hesaplaDagitim(agirlikliKalemler, hedefToplam) {
     // agirlikliKalemler: [{ad, birim, yaklasikFiyat}] -> [{ad, birim, adet, birimFiyat, tutar}]
     // Sonuç toplamı hedefToplam'ı asla aşmaz (gerekirse birkaç TL altında kalır).
@@ -92,6 +93,7 @@
     urunler: db.collection('urunler'),
     isletmeler: db.collection('isletmeler'),
     siparisler: db.collection('siparisler'),
+    teklifler: db.collection('teklifler'),
     meta: db.collection('meta')
   };
 
@@ -334,6 +336,28 @@
   }
   async function fsSetFirma(payload) {
     await col.meta.doc('firma').set(payload, { merge: true });
+  }
+
+  // ---- Teklifler / Faturalar ----
+  async function fsGetTeklifler() {
+    const snap = await col.teklifler.get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.tarih < b.tarih ? 1 : -1));
+  }
+  async function fsAddTeklif(payload) {
+    const data = { ...payload, durum: 'taslak', olusturmaTarihi: new Date().toISOString() };
+    const ref = await col.teklifler.add(data);
+    return { id: ref.id, ...data };
+  }
+  async function fsUpdateTeklif(id, payload) {
+    await col.teklifler.doc(id).update(payload);
+  }
+  async function fsDeleteTeklif(id) {
+    await col.teklifler.doc(id).delete();
+  }
+  function kdvAyristir(toplamKdvDahil, kdvOrani) {
+    const matrah = round2(toplamKdvDahil / (1 + (kdvOrani || 0) / 100));
+    const kdv = round2(toplamKdvDahil - matrah);
+    return { matrah, kdv };
   }
 
   async function fsGetDashboard() {
@@ -582,6 +606,7 @@
     if (state.view === 'siparis') return renderSiparisOlustur();
     if (state.view === 'siparisler') return renderSiparisler();
     if (state.view === 'teklif') return renderTeklif();
+    if (state.view === 'faturalar') return renderFaturalar();
     if (state.view === 'isletmeler') return renderIsletmeler();
     if (state.view === 'urunler') return renderUrunler();
     if (state.view === 'stok') return renderStok();
@@ -683,6 +708,9 @@
         <datalist id="birimListesi">
           ${state.birimler.map(b => `<option value="${esc(b)}">`).join('')}
         </datalist>
+        <datalist id="adetOneriListesi">
+          ${[1,2,3,5,10,12,20,24,50,100].map(n => `<option value="${n}">`).join('')}
+        </datalist>
         <div class="line-item-header">
           <span>Ürün Adı</span><span>Birim</span><span>Adet</span><span>KDV%</span><span>Birim Fiyat</span><span>Tutar</span><span>Yaklaşık</span><span></span>
         </div>
@@ -742,7 +770,7 @@
       row.innerHTML = `
         <input class="k-urun-ad" type="text" list="urunListesi" placeholder="Ürün adı (seç ya da yaz)" autocomplete="off" value="${ad}">
         <input class="k-birim" type="text" list="birimListesi" placeholder="Birim" value="${birim}" autocomplete="off">
-        <input class="k-adet" type="number" step="0.01" placeholder="Adet" value="${adet}">
+        <input class="k-adet" type="number" step="0.01" placeholder="Adet" value="${adet}" list="adetOneriListesi">
         <input class="k-kdv" type="number" placeholder="KDV%" value="${kdv}">
         <input class="k-fiyat" type="number" step="0.01" placeholder="Birim fiyat" value="${fiyat}">
         <div class="k-tutar">0,00 TL</div>
@@ -982,6 +1010,11 @@
         <button id="csvIndirBtn" class="btn btn-ghost btn-sm">CSV İndir</button></div>
       <div class="toolbar">
         <input type="text" id="sipArama" placeholder="İşletme adı veya sipariş no ile ara">
+        <select id="sipIsletmeFiltre">
+          <option value="">Tüm işletmeler</option>
+          ${state.isletmeler.map(i => `<option value="${esc(i.ad)}">${esc(i.ad)}</option>`).join('')}
+        </select>
+        <input type="month" id="sipAyFiltre">
         <select id="sipTurFiltre">
           <option value="">Tüm türler</option>
           <option value="satis">Satış</option>
@@ -993,6 +1026,7 @@
           <option value="hayir">Bekliyor</option>
         </select>
       </div>
+      <div id="isletmeOzetKutu"></div>
       <div id="siparisListesi">Yükleniyor…</div>`;
 
     let tumu;
@@ -1099,20 +1133,48 @@
     }
     ciz(tumu);
 
+    function isletmeOzetGoster(isletmeAdi) {
+      const kutu = document.getElementById('isletmeOzetKutu');
+      if (!isletmeAdi) { kutu.innerHTML = ''; return; }
+      const isletmeSip = tumu.filter(s => s.isletmeAdi === isletmeAdi);
+      let alacak = 0, borc = 0;
+      isletmeSip.forEach(s => {
+        const kalan = round2(s.toplamTutar - (s.odenenTutar || 0));
+        if (s.tur === 'satis') alacak += kalan; else borc += kalan;
+      });
+      const net = round2(alacak - borc);
+      kutu.innerHTML = `<div class="card mb-0" style="margin-bottom:16px;">
+        <div style="font-weight:600; font-size:14px; margin-bottom:8px;">${esc(isletmeAdi)} — Genel Durum</div>
+        <div class="grid grid-4">
+          <div><div class="sub" style="font-size:11px;">TOPLAM SİPARİŞ</div><div class="mono" style="font-size:15px;">${isletmeSip.length}</div></div>
+          <div><div class="sub" style="font-size:11px;">ALACAĞIM</div><div class="mono" style="font-size:15px; color:var(--teal-700);">${money(alacak)}</div></div>
+          <div><div class="sub" style="font-size:11px;">BORCUM</div><div class="mono" style="font-size:15px; color:var(--danger);">${money(borc)}</div></div>
+          <div><div class="sub" style="font-size:11px;">NET DURUM</div><div class="mono" style="font-size:15px; color:${net >= 0 ? 'var(--teal-700)' : 'var(--danger)'};">${net >= 0 ? 'Alacaklı: ' : 'Borçlu: '}${money(Math.abs(net))}</div></div>
+        </div>
+      </div>`;
+    }
+
     function filtrele() {
       const q = document.getElementById('sipArama').value.trim().toLowerCase();
       const tur = document.getElementById('sipTurFiltre').value;
       const teslim = document.getElementById('sipTeslimFiltre').value;
+      const isletmeSecili = document.getElementById('sipIsletmeFiltre').value;
+      const ay = document.getElementById('sipAyFiltre').value;
       let liste = tumu;
       if (tur) liste = liste.filter(s => s.tur === tur);
       if (teslim === 'evet') liste = liste.filter(s => s.teslimEdildi);
       if (teslim === 'hayir') liste = liste.filter(s => !s.teslimEdildi);
+      if (isletmeSecili) liste = liste.filter(s => s.isletmeAdi === isletmeSecili);
+      if (ay) liste = liste.filter(s => String(s.tarih || '').slice(0, 7) === ay);
       if (q) liste = liste.filter(s => (s.isletmeAdi || '').toLowerCase().includes(q) || String(s.siraNo).includes(q));
+      isletmeOzetGoster(isletmeSecili);
       ciz(liste);
     }
     document.getElementById('sipArama').addEventListener('input', filtrele);
     document.getElementById('sipTurFiltre').addEventListener('change', filtrele);
     document.getElementById('sipTeslimFiltre').addEventListener('change', filtrele);
+    document.getElementById('sipIsletmeFiltre').addEventListener('change', filtrele);
+    document.getElementById('sipAyFiltre').addEventListener('change', filtrele);
 
     document.getElementById('csvIndirBtn').addEventListener('click', () => {
       const rows = [['Sipariş No','Tarih','İşletme','Tür','Toplam','Ödenen','Kalan','Ödeme Türü','Teslimat','Oluşturan']];
@@ -1525,121 +1587,289 @@
   // ================= TEKLİF HAZIRLA =================
   function renderTeklif() {
     main.innerHTML = `
-      <div class="page-header"><div><h1>Teklif Hazırla</h1><div class="sub">Ürün miktarı 1. teklife göre sabitlenir, 2. ve 3. teklifte sadece birim fiyat değişir</div></div></div>
+      <div class="page-header"><div><h1>Teklif Hazırla</h1><div class="sub">1. teklif bizim teklifimizdir; 2. ve 3. teklif aynı miktarlarla, makul oranda daha yüksek fiyatla otomatik oluşur</div></div></div>
       <div class="card">
-        <div class="field" style="max-width:420px;">
-          <label>İşletme adı</label>
-          <input type="text" id="teklifIsletme" list="isletmeListesiTeklif" placeholder="Mevcut işletme ya da yeni ad yaz" autocomplete="off">
-          <datalist id="isletmeListesiTeklif">${state.isletmeler.map(i => `<option value="${esc(i.ad)}">`).join('')}</datalist>
+        <div class="grid grid-2">
+          <div class="field">
+            <label>İşletme adı</label>
+            <input type="text" id="teklifIsletme" list="isletmeListesiTeklif" placeholder="Mevcut işletme ya da yeni ad yaz" autocomplete="off">
+            <datalist id="isletmeListesiTeklif">${state.isletmeler.map(i => `<option value="${esc(i.ad)}">`).join('')}</datalist>
+          </div>
+          <div class="field" style="max-width:160px;">
+            <label>KDV oranı %</label>
+            <input type="number" id="teklifKdv" value="20">
+          </div>
         </div>
 
         <h3 style="font-size:14px; margin:18px 0 4px;">Ürünler</h3>
         <p class="sub" style="color:var(--ink-soft); font-size:12px; margin:0 0 10px;">
-          Her ürün için 1, 2 ve 3. teklife ait tahmini birim maliyetleri gir (örn. eldiven için 25 / 30 / 35 TL).
-          Miktar sadece 1. teklif tutarına göre hesaplanır ve her üç teklifte de aynı kalır — sadece fiyat değişir.
-          2. ve 3. maliyeti boş bırakırsan 1. maliyetle aynı kabul edilir.
+          Her ürün için sadece tahmini birim maliyeti yeterli — miktar, aşağıdaki hedef tutara göre
+          otomatik hesaplanır ve her üç teklifte de aynı kalır.
         </p>
-        <div class="line-item-header" style="grid-template-columns:1.8fr 0.8fr 0.8fr 0.8fr 0.8fr auto;">
-          <span>Ürün Adı</span><span>Birim</span><span>Maliyet 1</span><span>Maliyet 2</span><span>Maliyet 3</span><span></span>
+        <div class="line-item-header" style="grid-template-columns:2fr 1fr 1fr auto;">
+          <span>Ürün Adı</span><span>Birim</span><span>Yaklaşık Maliyet</span><span></span>
         </div>
         <datalist id="urunListesiTeklif">${state.urunler.map(u => `<option value="${esc(u.ad)}">`).join('')}</datalist>
         <datalist id="birimListesiTeklif">${state.birimler.map(b => `<option value="${esc(b)}">`).join('')}</datalist>
         <div id="teklifKalemList"></div>
         <button id="teklifKalemEkleBtn" type="button" class="btn btn-ghost btn-sm">+ Ürün ekle</button>
 
-        <h3 style="font-size:14px; margin:18px 0 10px;">1. Teklif Hedef Toplam Tutar</h3>
+        <h3 style="font-size:14px; margin:18px 0 10px;">1. Teklif — İstenen (ya da en yakın) Toplam Tutar</h3>
         <div class="field" style="max-width:220px;">
           <input type="number" step="0.01" id="teklifHedef1" placeholder="örn. 500">
         </div>
         <p class="sub" style="color:var(--ink-soft); font-size:12px; margin:6px 0 14px;">
-          2. ve 3. teklifin toplamı, bu tutardan hesaplanan miktar × kendi maliyetlerine göre otomatik çıkar — ayrıca tutar girmene gerek yok.
+          2. teklif 1.'den ~%10, 3. teklif ~%20 daha yüksek olacak şekilde otomatik oluşturulur — aynı ürün miktarlarıyla.
         </p>
-        <button id="teklifHesaplaBtn" class="btn btn-amber">3 Teklifi Hesapla</button>
+        <button id="teklifOlusturBtn" class="btn btn-amber">Teklifi Oluştur ve Kaydet</button>
+        <button id="teklifTemizleBtn" type="button" class="btn btn-ghost hidden">Formu Temizle</button>
       </div>
-      <div id="teklifSonuclar" class="mt-4"></div>`;
+
+      <div class="page-header mt-4"><div><h1 style="font-size:18px;">Kayıtlı Teklifler</h1></div></div>
+      <div id="teklifListesi">Yükleniyor…</div>`;
 
     let sayac = 0;
     const list = document.getElementById('teklifKalemList');
-    function satirEkle() {
+    let duzenlenenTeklifId = null;
+
+    function satirEkle(mevcut) {
       sayac++;
       const row = document.createElement('div');
       row.className = 'line-item-row';
-      row.style.gridTemplateColumns = '1.8fr 0.8fr 0.8fr 0.8fr 0.8fr auto';
+      row.style.gridTemplateColumns = '2fr 1fr 1fr auto';
       row.innerHTML = `
-        <input class="t-ad" type="text" list="urunListesiTeklif" placeholder="Ürün adı" autocomplete="off">
-        <input class="t-birim" type="text" list="birimListesiTeklif" placeholder="Birim" value="adet" autocomplete="off">
-        <input class="t-m1" type="number" step="0.01" placeholder="örn. 25">
-        <input class="t-m2" type="number" step="0.01" placeholder="örn. 30">
-        <input class="t-m3" type="number" step="0.01" placeholder="örn. 35">
+        <input class="t-ad" type="text" list="urunListesiTeklif" placeholder="Ürün adı" autocomplete="off" value="${mevcut ? esc(mevcut.ad) : ''}">
+        <input class="t-birim" type="text" list="birimListesiTeklif" placeholder="Birim" value="${mevcut ? esc(mevcut.birim) : 'adet'}" autocomplete="off">
+        <input class="t-maliyet" type="number" step="0.01" placeholder="örn. 25" value="${mevcut ? mevcut.maliyet : ''}">
         <button type="button" class="icon-btn" title="Kaldır">✕</button>
       `;
       list.appendChild(row);
       row.querySelector('.t-ad').addEventListener('input', (e) => {
         const eslesen = state.urunler.find(u => u.ad.toLowerCase() === e.target.value.trim().toLowerCase());
         if (eslesen) {
-          row.querySelector('.t-m1').value = eslesen.satisFiyati;
+          row.querySelector('.t-maliyet').value = eslesen.satisFiyati;
           if (eslesen.birim) row.querySelector('.t-birim').value = eslesen.birim;
         }
       });
       row.querySelector('.icon-btn').addEventListener('click', () => row.remove());
     }
-    document.getElementById('teklifKalemEkleBtn').addEventListener('click', satirEkle);
+    document.getElementById('teklifKalemEkleBtn').addEventListener('click', () => satirEkle());
     satirEkle();
 
-    let sonTeklifler = null;
+    function formuTemizle() {
+      duzenlenenTeklifId = null;
+      document.getElementById('teklifIsletme').value = '';
+      document.getElementById('teklifKdv').value = 20;
+      document.getElementById('teklifHedef1').value = '';
+      list.innerHTML = '';
+      satirEkle();
+      document.getElementById('teklifOlusturBtn').textContent = 'Teklifi Oluştur ve Kaydet';
+      document.getElementById('teklifTemizleBtn').classList.add('hidden');
+    }
+    document.getElementById('teklifTemizleBtn').addEventListener('click', formuTemizle);
 
-    document.getElementById('teklifHesaplaBtn').addEventListener('click', () => {
+    function teklifHesapla(satirlar, hedef1, kdvOrani) {
+      const dagitim1 = hesaplaDagitim(satirlar.map(s => ({ ad: s.ad, birim: s.birim, yaklasikFiyat: s.maliyet })), hedef1);
+      if (!dagitim1) return null;
+      const teklif1 = { kalemler: dagitim1, toplam: round2(dagitim1.reduce((t, k) => t + k.tutar, 0)) };
+      const teklif2 = { kalemler: dagitim1.map(k => {
+        const birimFiyat = ceil2(k.birimFiyat * 1.10);
+        return { ad: k.ad, birim: k.birim, adet: k.adet, birimFiyat, tutar: round2(k.adet * birimFiyat) };
+      })};
+      teklif2.toplam = round2(teklif2.kalemler.reduce((t, k) => t + k.tutar, 0));
+      const teklif3 = { kalemler: dagitim1.map(k => {
+        const birimFiyat = ceil2(k.birimFiyat * 1.20);
+        return { ad: k.ad, birim: k.birim, adet: k.adet, birimFiyat, tutar: round2(k.adet * birimFiyat) };
+      })};
+      teklif3.toplam = round2(teklif3.kalemler.reduce((t, k) => t + k.tutar, 0));
+      return [teklif1, teklif2, teklif3];
+    }
+
+    document.getElementById('teklifOlusturBtn').addEventListener('click', async () => {
       const isletmeAdi = document.getElementById('teklifIsletme').value.trim();
+      if (!isletmeAdi) return toast('İşletme adı gir', true);
+      const kdvOrani = Number(document.getElementById('teklifKdv').value) || 0;
       const satirlar = [];
       list.querySelectorAll('.line-item-row').forEach(row => {
         const ad = row.querySelector('.t-ad').value.trim();
         const birim = row.querySelector('.t-birim').value.trim() || 'adet';
-        const m1 = Number(row.querySelector('.t-m1').value) || 0;
-        const m2 = Number(row.querySelector('.t-m2').value) || 0;
-        const m3 = Number(row.querySelector('.t-m3').value) || 0;
-        if (ad && m1 > 0) satirlar.push({ ad, birim, m1, m2: m2 > 0 ? m2 : m1, m3: m3 > 0 ? m3 : m1 });
+        const maliyet = Number(row.querySelector('.t-maliyet').value) || 0;
+        if (ad && maliyet > 0) satirlar.push({ ad, birim, maliyet });
       });
-      if (!satirlar.length) return toast('En az bir ürün ve 1. maliyetini gir', true);
-
+      if (!satirlar.length) return toast('En az bir ürün ve yaklaşık maliyetini gir', true);
       const hedef1 = Number(document.getElementById('teklifHedef1').value) || 0;
       if (hedef1 <= 0) return toast('1. teklif için hedef toplam tutar gir', true);
 
-      const dagitim1 = hesaplaDagitim(satirlar.map(s => ({ ad: s.ad, birim: s.birim, yaklasikFiyat: s.m1 })), hedef1);
-      if (!dagitim1) return toast('Dağıtım hesaplanamadı, maliyetleri kontrol et', true);
+      const teklifler3 = teklifHesapla(satirlar, hedef1, kdvOrani);
+      if (!teklifler3) return toast('Dağıtım hesaplanamadı, maliyetleri kontrol et', true);
 
-      const teklif1 = { hedef: hedef1, kalemler: dagitim1, toplam: round2(dagitim1.reduce((t, k) => t + k.tutar, 0)) };
-      const teklif2 = { hedef: null, kalemler: satirlar.map((s, idx) => {
-        const adet = dagitim1[idx].adet;
-        const tutar = round2(adet * s.m2);
-        return { ad: s.ad, birim: s.birim, adet, birimFiyat: s.m2, tutar };
-      })};
-      teklif2.toplam = round2(teklif2.kalemler.reduce((t, k) => t + k.tutar, 0));
-      const teklif3 = { hedef: null, kalemler: satirlar.map((s, idx) => {
-        const adet = dagitim1[idx].adet;
-        const tutar = round2(adet * s.m3);
-        return { ad: s.ad, birim: s.birim, adet, birimFiyat: s.m3, tutar };
-      })};
-      teklif3.toplam = round2(teklif3.kalemler.reduce((t, k) => t + k.tutar, 0));
+      const payload = { isletmeAdi, kdvOrani, hedefTutar: hedef1, kalemGirdileri: satirlar, teklifler: teklifler3, tarih: todayISO() };
+      try {
+        if (duzenlenenTeklifId) {
+          await fsUpdateTeklif(duzenlenenTeklifId, payload);
+          toast('Teklif güncellendi');
+        } else {
+          await fsAddTeklif(payload);
+          toast('Teklif kaydedildi');
+        }
+        formuTemizle();
+        teklifleriListele();
+      } catch (err) { toast(err.message, true); }
+    });
 
-      sonTeklifler = [teklif1, teklif2, teklif3];
+    function teklifiDuzenlemeyeYukle(t) {
+      duzenlenenTeklifId = t.id;
+      document.getElementById('teklifIsletme').value = t.isletmeAdi;
+      document.getElementById('teklifKdv').value = t.kdvOrani;
+      document.getElementById('teklifHedef1').value = t.hedefTutar;
+      list.innerHTML = '';
+      t.kalemGirdileri.forEach(k => satirEkle(k));
+      document.getElementById('teklifOlusturBtn').textContent = 'Değişiklikleri Kaydet';
+      document.getElementById('teklifTemizleBtn').classList.remove('hidden');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
 
-      const host = document.getElementById('teklifSonuclar');
-      host.innerHTML = `
-        <div class="grid" style="grid-template-columns:repeat(3, 1fr); gap:16px;">
-          ${sonTeklifler.map((t, i) => `
-            <div class="card">
-              <h3 style="font-size:14px; margin-bottom:4px;">Teklif ${i + 1}${i === 0 ? ` <span class="sub" style="font-weight:400;">(hedef ${money(t.hedef)})</span>` : ''}</h3>
-              <table><thead><tr><th>Ürün</th><th class="text-right">Adet</th><th>Birim</th><th class="text-right">B. Fiyat</th><th class="text-right">Tutar</th></tr></thead>
-              <tbody>${t.kalemler.map(k => `<tr><td>${esc(k.ad)}</td><td class="text-right mono">${k.adet}</td><td>${esc(k.birim)}</td><td class="text-right mono">${money(k.birimFiyat)}</td><td class="text-right mono">${money(k.tutar)}</td></tr>`).join('')}</tbody></table>
-              <div class="mono text-right mt-4" style="font-size:15px;">Toplam: ${money(t.toplam)}</div>
-            </div>`).join('')}
-        </div>
-        <div class="text-right mt-4">
-          <button id="teklifPdfBtn" class="btn btn-amber">Tüm Teklifleri İndir / Yazdır (PDF)</button>
-        </div>`;
-      document.getElementById('teklifPdfBtn').addEventListener('click', async () => {
-        try { await teklifPdfOlusturVeAc(isletmeAdi, sonTeklifler); } catch (err) { toast('PDF oluşturulamadı: ' + err.message, true); }
+    async function teklifleriListele() {
+      const host = document.getElementById('teklifListesi');
+      let teklifler;
+      try { teklifler = await fsGetTeklifler(); } catch (err) { host.innerHTML = ''; return toast(err.message, true); }
+      if (!teklifler.length) { host.innerHTML = `<div class="card"><div class="empty-state">Henüz teklif oluşturulmadı.</div></div>`; return; }
+
+      host.innerHTML = teklifler.map(t => `
+        <div class="card mt-4">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
+            <div>
+              <div style="font-weight:600; font-size:14.5px; color:var(--teal-950);">${esc(t.isletmeAdi)}
+                <span class="badge status-pill ${t.durum === 'faturaKesildi' ? 'status-green' : (t.durum === 'verildi' ? 'status-green' : 'status-red')}" data-verildi-toggle="${t.id}" data-mevcut="${t.durum === 'verildi' || t.durum === 'faturaKesildi' ? '1' : '0'}">
+                  ${t.durum === 'verildi' || t.durum === 'faturaKesildi' ? '✓ Teklif Verildi' : '⏳ Teklif Verilmedi'}
+                </span>
+                ${t.durum === 'faturaKesildi' ? '<span class="badge status-pill status-green">🧾 Fatura Kesildi</span>' : ''}
+              </div>
+              <div class="sub" style="font-size:12px;">${formatTarih(t.tarih)} · KDV %${t.kdvOrani} · Hedef: ${money(t.hedefTutar)}</div>
+            </div>
+            <div class="oc-actions">
+              <button class="btn btn-ghost btn-sm" data-duzenle-teklif="${t.id}">Düzenle</button>
+              <button class="btn btn-ghost btn-sm" data-pdf-teklif="${t.id}">İndir/Yazdır</button>
+              ${t.durum !== 'faturaKesildi' ? `<button class="btn btn-amber btn-sm" data-fatura-kes="${t.id}">Fatura Kesildi İşaretle</button>` : ''}
+              <button class="btn btn-danger btn-sm" data-sil-teklif="${t.id}">Sil</button>
+            </div>
+          </div>
+          <div class="grid" style="grid-template-columns:repeat(3,1fr); gap:12px; margin-top:14px;">
+            ${t.teklifler.map((tk, i) => `
+              <div style="border:1px solid var(--line); border-radius:10px; padding:10px 12px;">
+                <div style="font-size:12px; font-weight:700; color:var(--teal-950); margin-bottom:4px;">Teklif ${i + 1}</div>
+                <div class="mono" style="font-size:14px;">${money(tk.toplam)}</div>
+              </div>`).join('')}
+          </div>
+        </div>`).join('');
+
+      host.querySelectorAll('button[data-duzenle-teklif]').forEach(btn => btn.addEventListener('click', () => {
+        const t = teklifler.find(x => x.id === btn.dataset.duzenleTeklif);
+        teklifiDuzenlemeyeYukle(t);
+      }));
+      host.querySelectorAll('button[data-pdf-teklif]').forEach(btn => btn.addEventListener('click', async () => {
+        const t = teklifler.find(x => x.id === btn.dataset.pdfTeklif);
+        try { await teklifPdfOlusturVeAc(t.isletmeAdi, t.teklifler); } catch (err) { toast('PDF oluşturulamadı: ' + err.message, true); }
+      }));
+      host.querySelectorAll('button[data-sil-teklif]').forEach(btn => btn.addEventListener('click', async () => {
+        const ok = await confirmDialog('Bu teklifi silmek istediğine emin misin?');
+        if (!ok) return;
+        try { await fsDeleteTeklif(btn.dataset.silTeklif); toast('Teklif silindi'); teklifleriListele(); }
+        catch (err) { toast(err.message, true); }
+      }));
+      host.querySelectorAll('button[data-verildi-toggle]').forEach(btn => btn.addEventListener('click', async () => {
+        const t = teklifler.find(x => x.id === btn.dataset.verildiToggle);
+        if (t.durum === 'faturaKesildi') return toast('Fatura kesilmiş bir teklifin durumu değiştirilemez', true);
+        const yeniDurum = btn.dataset.mevcut === '1' ? 'taslak' : 'verildi';
+        try { await fsUpdateTeklif(t.id, { durum: yeniDurum }); toast('Durum güncellendi'); teklifleriListele(); }
+        catch (err) { toast(err.message, true); }
+      }));
+      host.querySelectorAll('button[data-fatura-kes]').forEach(btn => btn.addEventListener('click', async () => {
+        const t = teklifler.find(x => x.id === btn.dataset.faturaKes);
+        const ok = await confirmDialog(`"${t.isletmeAdi}" için Teklif 1 tutarı (${money(t.teklifler[0].toplam)}) üzerinden fatura kesildi olarak işaretlensin mi? Bu, Fatura Kesilenler sayfasında (aylık KDV raporunda) görünecek.`);
+        if (!ok) return;
+        try {
+          await fsUpdateTeklif(t.id, { durum: 'faturaKesildi', faturaTarihi: todayISO(), faturaTutari: t.teklifler[0].toplam });
+          toast('Fatura kesildi olarak işaretlendi');
+          teklifleriListele();
+        } catch (err) { toast(err.message, true); }
+      }));
+    }
+    teklifleriListele();
+  }
+
+  // ================= FATURA KESİLENLER =================
+  async function renderFaturalar() {
+    main.innerHTML = `
+      <div class="page-header"><div><h1>Fatura Kesilenler</h1><div class="sub">Fatura kesilen teklifler ve aylık KDV özeti</div></div></div>
+      <div class="toolbar">
+        <input type="month" id="faturaAyFiltre">
+        <button id="faturaAyTemizleBtn" class="btn btn-ghost btn-sm">Tüm Aylar</button>
+      </div>
+      <div id="faturaAylikOzet" class="card mb-0"></div>
+      <div id="faturaListesi" class="mt-4">Yükleniyor…</div>`;
+
+    let tumu;
+    try {
+      const teklifler = await fsGetTeklifler();
+      tumu = teklifler.filter(t => t.durum === 'faturaKesildi');
+    } catch (err) { return toast(err.message, true); }
+    tumu.sort((a, b) => (a.faturaTarihi < b.faturaTarihi ? 1 : -1));
+
+    function ayAnahtari(tarihISO) { return String(tarihISO || '').slice(0, 7); }
+
+    function aylikOzetCiz() {
+      const gruplar = {};
+      tumu.forEach(t => {
+        const ay = ayAnahtari(t.faturaTarihi);
+        const tutar = t.faturaTutari != null ? t.faturaTutari : t.teklifler[0].toplam;
+        const { kdv } = kdvAyristir(tutar, t.kdvOrani);
+        if (!gruplar[ay]) gruplar[ay] = { tutar: 0, kdv: 0, adet: 0 };
+        gruplar[ay].tutar = round2(gruplar[ay].tutar + tutar);
+        gruplar[ay].kdv = round2(gruplar[ay].kdv + kdv);
+        gruplar[ay].adet++;
       });
+      const aylar = Object.keys(gruplar).sort().reverse();
+      const kutu = document.getElementById('faturaAylikOzet');
+      kutu.innerHTML = `<h3 style="font-size:14px; margin-bottom:10px;">Aylık Özet</h3>` + (aylar.length ? `
+        <table><thead><tr><th>Ay</th><th class="text-right">Fatura Sayısı</th><th class="text-right">Toplam Tutar</th><th class="text-right">KDV Tutarı</th></tr></thead><tbody>
+        ${aylar.map(ay => `<tr><td>${ayAdi(ay)}</td><td class="text-right mono">${gruplar[ay].adet}</td><td class="text-right mono">${money(gruplar[ay].tutar)}</td><td class="text-right mono">${money(gruplar[ay].kdv)}</td></tr>`).join('')}
+        </tbody></table>` : `<div class="empty-state">Henüz fatura kesilmiş kayıt yok.</div>`);
+    }
+
+    function ayAdi(ayKey) {
+      if (!ayKey) return '';
+      const [yil, ay] = ayKey.split('-');
+      const aylar = ['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'];
+      return `${aylar[Number(ay) - 1]} ${yil}`;
+    }
+
+    function listeCiz(filtreAy) {
+      const liste = filtreAy ? tumu.filter(t => ayAnahtari(t.faturaTarihi) === filtreAy) : tumu;
+      const host = document.getElementById('faturaListesi');
+      if (!liste.length) { host.innerHTML = `<div class="card"><div class="empty-state">Bu aralıkta fatura yok.</div></div>`; return; }
+      let toplamGenel = 0, kdvGenel = 0;
+      const satirlar = liste.map(t => {
+        const tutar = t.faturaTutari != null ? t.faturaTutari : t.teklifler[0].toplam;
+        const { matrah, kdv } = kdvAyristir(tutar, t.kdvOrani);
+        toplamGenel = round2(toplamGenel + tutar);
+        kdvGenel = round2(kdvGenel + kdv);
+        return `<tr><td>${formatTarih(t.faturaTarihi)}</td><td>${esc(t.isletmeAdi)}</td><td class="text-right mono">%${t.kdvOrani}</td><td class="text-right mono">${money(matrah)}</td><td class="text-right mono">${money(kdv)}</td><td class="text-right mono">${money(tutar)}</td></tr>`;
+      }).join('');
+      host.innerHTML = `<div class="card">
+        <table><thead><tr><th>Fatura Tarihi</th><th>İşletme</th><th class="text-right">KDV%</th><th class="text-right">Matrah</th><th class="text-right">KDV Tutarı</th><th class="text-right">Toplam</th></tr></thead>
+        <tbody>${satirlar}</tbody>
+        <tfoot><tr style="font-weight:700;"><td colspan="4" class="text-right">Seçili aralık toplamı:</td><td class="text-right mono">${money(kdvGenel)}</td><td class="text-right mono">${money(toplamGenel)}</td></tr></tfoot></table>
+      </div>`;
+    }
+
+    aylikOzetCiz();
+    listeCiz(null);
+
+    document.getElementById('faturaAyFiltre').addEventListener('change', (e) => listeCiz(e.target.value || null));
+    document.getElementById('faturaAyTemizleBtn').addEventListener('click', () => {
+      document.getElementById('faturaAyFiltre').value = '';
+      listeCiz(null);
     });
   }
 

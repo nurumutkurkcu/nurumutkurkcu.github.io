@@ -102,3 +102,23 @@ diğerlerine (manifest.json, icon'lar, firestore.rules) dokunmana gerek yok.
 - **Ayarlar'a hızlı ürün/işletme ekleme** kartları eklendi.
 - Kalem satırında fiyat girilmeden kaydetmeye çalışırsan artık uyarı alırsın
   (yaklaşık işaretlenmemişse hem adet hem fiyat zorunlu).
+
+## Bu sürümde eklenenler (5. güncelleme)
+- **Teklif Hazırla tamamen yenilendi:** Artık sadece 1. teklifi (istenen/en
+  yakın toplam tutar + ürün maliyetleri) giriyorsun. Sistem miktarı buna göre
+  hesaplayıp sabitliyor; 2. teklif ~%10, 3. teklif ~%20 daha yüksek fiyatla
+  otomatik oluşuyor — hepsi aynı miktarda. Teklifler artık kalıcı olarak
+  kaydediliyor, aşağıda listeleniyor; her biri **Düzenle**, **Sil**,
+  **Teklif Verildi** (yeşil yanar) ve **Fatura Kesildi İşaretle** butonlarına
+  sahip.
+- **Yeni: Faturalar sayfası** — "Fatura Kesildi" işaretlenen teklifler burada
+  listeleniyor. Her fatura için KDV oranına göre matrah/KDV tutarı otomatik
+  ayrıştırılıyor. Ay filtresiyle (örn. Ağustos 2026) tek tek ve toplu KDV
+  tutarını görebiliyorsun; üstte her ay için otomatik özet tablosu var.
+  *Not: Fatura kesilirken esas alınan tutar her zaman Teklif 1'in toplamıdır
+  (bizim asıl teklifimiz kabul edildiği varsayılır).*
+- **Siparişler sayfasına işletme ve ay filtresi eklendi** — bir işletme
+  seçtiğinde üstte o işletmenin toplam sipariş sayısı, alacağın, borcun ve
+  net durumunu gösteren bir özet paneli çıkıyor.
+- Sipariş kalemlerinde adet alanına sık kullanılan değerler (1, 2, 5, 10,
+  12, 24, 50, 100...) öneri olarak eklendi.
