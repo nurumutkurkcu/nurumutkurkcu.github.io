@@ -1,9 +1,9 @@
-// Nur Umut Kürkü Temizlik ve Hijyen - Service Worker
+// Nur Umut Kürkçü Temizlik ve Hijyen - Service Worker
 // Sadece görsel kabuk (HTML/CSS/JS/ikon) önbelleğe alınır. Firebase/Firestore
 // istekleri farklı bir alan adına gittiği için bu service worker'a hiç
 // uğramaz — veri her zaman canlı ve senkron kalır.
 
-const CACHE_NAME = 'nur-umut-shell-v3';
+const CACHE_NAME = 'nur-umut-shell-v4';
 const APP_SHELL = [
   './',
   './index.html',

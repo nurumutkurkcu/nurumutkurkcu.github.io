@@ -1,4 +1,4 @@
-# Nur Umut Kürkü Temizlik ve Hijyen — Sipariş / Cari / Stok Sistemi
+# Nur Umut Kürkçü Temizlik ve Hijyen — Sipariş / Cari / Stok Sistemi
 ### (Firebase + GitHub Pages sürümü)
 
 Bu paketteki tüm dosyalar **tek bir klasörde, alt klasör olmadan** —
@@ -66,3 +66,19 @@ diğerlerine (manifest.json, icon'lar, firestore.rules) dokunmana gerek yok.
   (fiyat, telefon, adres vb.) sonradan değiştirebiliyorsun.
 - **Ayarlar genişledi:** Firma bilgileri, birim listesi ve ödeme türü
   listesi buradan yönetiliyor.
+
+## Bu sürümde eklenenler (3. güncelleme)
+- **Firma adı düzeltildi:** "Nur Umut Kürkçü Temizlik ve Hijyen" (hem sitede
+  hem irsaliye/teklif PDF'lerinde). Not: Ayarlar'dan daha önce firma bilgisi
+  kaydettiysen, oradaki adı da elle güncellemen gerekir.
+- **Kalem tablosuna sütun başlıkları ve satır bazlı tutar** eklendi —
+  artık hangi kutunun ne olduğu ve her kalemin anlık tutarı görünüyor.
+- **Tüm tarihler artık GG.AA.YYYY formatında** gösteriliyor (Panel, Siparişler,
+  İşletme detayı, PDF).
+- **Teslimat ve ödeme durumu artık zarif, renkli pill-butonlar:** kırmızı
+  (Bekliyor / Ödenmedi) — yeşil (Teslim Edildi / Ödendi). Teslimat pill'ine
+  tıklayarak durumu değiştirebilirsin.
+- **Yeni: Teklif Hazırla sayfası** — işletme adı ve ürünleri (tahmini birim
+  fiyatlarıyla) gir, 3 farklı bütçe tutarı yaz, "3 Teklifi Hesapla" — sistem
+  her bütçe için adet/fiyatı otomatik hesaplar (yaklaşık dağıtım mantığıyla,
+  bütçeyi hiç aşmadan). Tek PDF'te (3 sayfa) indir/yazdır.

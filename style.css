@@ -155,12 +155,31 @@ button{font-family:inherit;}
 }
 .k-yaklasik-label input{width:auto !important; padding:0 !important;}
 .line-item-row input:disabled{background:var(--sage-100); color:var(--ink-soft);}
+.k-tutar{
+  font-size:13px; text-align:right; color:var(--teal-950); font-weight:600;
+  padding:8px 10px; background:var(--sage-100); border-radius:8px;
+}
 
 .order-card.clickable{cursor:pointer;}
 .order-detail{
   border:1px solid var(--line); border-top:none; border-radius:0 0 12px 12px;
   margin-top:-10px; margin-bottom:10px; padding:16px 18px; background:var(--sage-50);
 }
+.status-pill{
+  border:none; cursor:default; font-family:inherit; line-height:1.4;
+  display:inline-flex; align-items:center; gap:4px; font-weight:700;
+}
+button.status-pill{cursor:pointer; transition:transform .12s ease, filter .15s ease;}
+button.status-pill:hover{transform:translateY(-1px); filter:brightness(0.97);}
+.status-green{background:#E1F3EA; color:#137356;}
+.status-red{background:#FBE2DA; color:#B8452A;}
+
+.line-item-header{
+  display:grid; grid-template-columns:1.9fr 0.85fr 0.6fr 0.55fr 0.85fr 0.85fr 0.7fr auto;
+  gap:8px; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em;
+  color:var(--ink-soft); font-weight:600; padding:0 2px 4px;
+}
+@media (max-width:900px){.line-item-header{display:none;}}
 
 .modal-backdrop{
   position:fixed; inset:0; background:rgba(8,34,32,0.55);
@@ -249,7 +268,7 @@ tr.clickable:hover{background:var(--sage-100);}
 .toolbar input,.toolbar select{padding:9px 12px; border-radius:10px; border:1.5px solid var(--line); font-size:13.5px; font-family:inherit;}
 .spacer{flex:1;}
 
-.line-item-row{display:grid; grid-template-columns:1.9fr 0.85fr 0.6fr 0.55fr 0.85fr 0.7fr auto; gap:8px; align-items:center; margin-bottom:8px;}
+.line-item-row{display:grid; grid-template-columns:1.9fr 0.85fr 0.6fr 0.55fr 0.85fr 0.85fr 0.7fr auto; gap:8px; align-items:center; margin-bottom:8px;}
 @media (max-width:900px){.line-item-row{grid-template-columns:1fr; background:var(--sage-100); padding:12px; border-radius:10px;}}
 .line-item-row input,.line-item-row select{padding:8px 10px; border-radius:8px; border:1.5px solid var(--line); font-size:13px; width:100%;}
 .icon-btn{background:none; border:none; cursor:pointer; color:var(--danger); font-size:18px; padding:4px;}
