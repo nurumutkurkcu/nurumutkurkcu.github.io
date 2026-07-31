@@ -288,3 +288,53 @@ tr.clickable:hover{background:var(--sage-100);}
 .text-right{text-align:right;}
 .mt-4{margin-top:16px;}
 .mb-0{margin-bottom:0;}
+
+/* ================= MOBİL UYUM ================= */
+.mobile-topbar{display:none;}
+.sidebar-backdrop{display:none;}
+
+@media (max-width:860px){
+  .app-shell{display:block;}
+  .mobile-topbar{
+    display:flex; align-items:center; justify-content:space-between;
+    position:fixed; top:0; left:0; right:0; height:54px; z-index:40;
+    background:var(--teal-950); color:#fff; padding:0 14px;
+    box-shadow:0 2px 8px rgba(0,0,0,0.15);
+  }
+  .mobile-topbar .brand-mini{font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:14px;}
+  .hamburger-btn{background:none; border:none; color:#fff; font-size:22px; line-height:1; cursor:pointer; padding:6px;}
+  .sidebar{
+    position:fixed; top:0; left:0; height:100vh; width:250px; max-width:80vw;
+    z-index:50; transform:translateX(-100%); transition:transform .25s ease;
+    overflow-y:auto;
+  }
+  .sidebar.open{transform:translateX(0);}
+  .sidebar-backdrop{
+    display:block; position:fixed; inset:0; background:rgba(6,20,18,0.5);
+    z-index:45; opacity:0; pointer-events:none; transition:opacity .2s ease;
+  }
+  .sidebar-backdrop.open{opacity:1; pointer-events:auto;}
+  .main{padding:70px 14px 24px; max-width:100%;}
+  .page-header{flex-direction:column; align-items:flex-start; gap:8px;}
+  .page-header h1{font-size:20px;}
+}
+
+@media (max-width:520px){
+  html{font-size:15px;}
+  .grid-4{grid-template-columns:repeat(2,1fr);}
+  .grid-2{grid-template-columns:1fr;}
+  .card{padding:16px;}
+  .stat-card .value{font-size:21px;}
+  .order-card{flex-direction:column; align-items:stretch; gap:10px;}
+  .order-card .oc-tutar{text-align:left;}
+  .order-card .oc-actions{justify-content:flex-start;}
+  .modal{padding:24px 20px;}
+  table{font-size:12.5px;}
+  th,td{padding:7px 6px;}
+  .toolbar{flex-direction:column; align-items:stretch;}
+  .toolbar input,.toolbar select{width:100%;}
+  .toast{left:16px; right:16px; bottom:16px;}
+}
+
+/* Geniş tabloları taşırmadan yatay kaydırılabilir yap */
+.card{overflow-x:auto;}

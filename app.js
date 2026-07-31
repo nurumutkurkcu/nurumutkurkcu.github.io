@@ -9,7 +9,7 @@
   const EMAIL_DOMAIN = '@nurumut.local';
   const VARSAYILAN_BIRIMLER = ['adet','koli','galon','paket','bidon'];
   const VARSAYILAN_ODEME_TURLERI = ['Nakit','Havale/EFT','Kredi Kartı','Vadeli/Açık Hesap'];
-  const state = { view: 'dashboard', urunler: [], isletmeler: [], birimler: [], odemeTurleri: [], username: null };
+  const state = { view: 'dashboard', urunler: [], isletmeler: [], birimler: [], odemeTurleri: [], username: null, editingSiparis: null };
 
   // ---------- Yardımcılar ----------
   function toast(msg, isError) {
@@ -224,6 +224,60 @@
     await col.siparisler.doc(id).update(payload);
   }
 
+  async function fsOdemeEkle(id, ekTutar) {
+    await col.siparisler.doc(id).update({
+      odenenTutar: firebase.firestore.FieldValue.increment(round2(ekTutar))
+    });
+  }
+
+  async function fsUpdateSiparisFull(eski, payload) {
+    const siparisRef = col.siparisler.doc(eski.id);
+    return db.runTransaction(async (tx) => {
+      const refMap = new Map();
+      async function girdiAl(urunId) {
+        const ref = col.urunler.doc(urunId);
+        if (!refMap.has(ref.path)) {
+          const snap = await tx.get(ref);
+          refMap.set(ref.path, {
+            ref,
+            stokTakibi: snap.exists ? !!snap.data().stokTakibi : false,
+            stokAdedi: snap.exists ? snap.data().stokAdedi : null
+          });
+        }
+        return refMap.get(ref.path);
+      }
+      for (const k of eski.kalemler) {
+        if (!k.urunId) continue;
+        const g = await girdiAl(k.urunId);
+        if (g.stokTakibi && g.stokAdedi != null) {
+          g.stokAdedi = round2(g.stokAdedi + (eski.tur === 'alis' ? -k.adet : k.adet));
+        }
+      }
+      for (const k of payload.kalemler) {
+        if (!k.urunId) continue;
+        const g = await girdiAl(k.urunId);
+        if (g.stokTakibi && g.stokAdedi != null) {
+          g.stokAdedi = round2(g.stokAdedi + (payload.tur === 'alis' ? k.adet : -k.adet));
+        }
+      }
+      const yeni = {
+        isletmeId: payload.isletmeId, isletmeAdi: payload.isletmeAdi,
+        tur: payload.tur, tarih: payload.tarih, kalemler: payload.kalemler,
+        toplamTutar: payload.toplamTutar, odemeTuru: payload.odemeTuru,
+        odenenTutar: payload.odenenTutar, notlar: payload.notlar || '',
+        olusturanKullanici: eski.olusturanKullanici || payload.duzenleyen || '',
+        teslimEdildi: !!payload.teslimEdildi,
+        siraNo: eski.siraNo, olusturmaTarihi: eski.olusturmaTarihi,
+        sonDuzenleyen: payload.duzenleyen || '', sonDuzenlemeTarihi: new Date().toISOString()
+      };
+      tx.set(siparisRef, yeni);
+      for (const g of refMap.values()) {
+        if (g.stokTakibi && g.stokAdedi != null) tx.update(g.ref, { stokAdedi: g.stokAdedi });
+      }
+      return { id: eski.id, ...yeni };
+    });
+  }
+
   async function fsDeleteSiparis(siparis) {
     return db.runTransaction(async (tx) => {
       const urunSnaps = [];
@@ -233,6 +287,8 @@
         const snap = await tx.get(ref);
         urunSnaps.push({ ref, snap, kalem: k });
       }
+      const iptalRef = col.meta.doc('iptalEdilenSiparisler');
+      const iptalSnap = await tx.get(iptalRef);
       tx.delete(col.siparisler.doc(siparis.id));
       for (const u of urunSnaps) {
         if (!u.snap.exists) continue;
@@ -242,6 +298,10 @@
           tx.update(u.ref, { stokAdedi: geriAlinan });
         }
       }
+      // Silinen sipariş numarasını kayıt altına al — bu numara bir daha asla
+      // yeni bir siparişe verilmez (sayaç zaten hep ileri gider, geri sayılmaz).
+      const mevcutKayit = iptalSnap.exists && Array.isArray(iptalSnap.data().liste) ? iptalSnap.data().liste : [];
+      tx.set(iptalRef, { liste: [...mevcutKayit, { siraNo: siparis.siraNo, isletmeAdi: siparis.isletmeAdi, tutar: siparis.toplamTutar, silinmeTarihi: new Date().toISOString() }].slice(-200) });
     });
   }
 
@@ -482,13 +542,27 @@
   });
 
   // ---------- Navigasyon ----------
+  const sidebarEl = document.getElementById('sidebar');
+  const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+  const hamburgerBtn = document.getElementById('hamburgerBtn');
+  function sidebarKapat() { sidebarEl.classList.remove('open'); sidebarBackdrop.classList.remove('open'); }
+  if (hamburgerBtn) hamburgerBtn.addEventListener('click', () => {
+    sidebarEl.classList.toggle('open');
+    sidebarBackdrop.classList.toggle('open');
+  });
+  if (sidebarBackdrop) sidebarBackdrop.addEventListener('click', sidebarKapat);
+
   document.querySelectorAll('.nav-item').forEach(item => {
-    item.addEventListener('click', () => setView(item.dataset.view));
+    item.addEventListener('click', () => {
+      if (item.dataset.view === 'siparis') state.editingSiparis = null;
+      setView(item.dataset.view); sidebarKapat();
+    });
   });
   function setView(view) {
     state.view = view;
     document.querySelectorAll('.nav-item').forEach(i => i.classList.toggle('active', i.dataset.view === view));
     render();
+    window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
   }
 
   async function refreshLookups() {
@@ -565,13 +639,16 @@
 
   // ================= SİPARİŞ OLUŞTUR =================
   function renderSiparisOlustur() {
+    const editing = state.editingSiparis;
     main.innerHTML = `
-      <div class="page-header"><div><h1>Sipariş Oluştur</h1><div class="sub">Merkezi giriş ekranı — buradaki veriler cari ve stoğa otomatik işlenir</div></div></div>
+      <div class="page-header"><div><h1>${editing ? 'Siparişi Düzenle' : 'Sipariş Oluştur'}</h1><div class="sub">${editing ? `#${editing.siraNo} numaralı sipariş düzenleniyor` : 'Merkezi giriş ekranı — buradaki veriler cari ve stoğa otomatik işlenir'}</div></div>
+        ${editing ? '<button id="sipDuzenleIptalBtn" class="btn btn-ghost btn-sm">Düzenlemeyi bırak</button>' : ''}
+      </div>
       <div class="card">
         <div class="grid grid-2">
           <div class="field">
             <label>İşletme</label>
-            <input type="text" id="sipIsletme" list="isletmeListesi" placeholder="Mevcut işletmeyi seç ya da yeni ad yaz" autocomplete="off">
+            <input type="text" id="sipIsletme" list="isletmeListesi" placeholder="Mevcut işletmeyi seç ya da yeni ad yaz" autocomplete="off" value="${esc(editing ? editing.isletmeAdi : '')}">
             <datalist id="isletmeListesi">
               ${state.isletmeler.map(i => `<option value="${esc(i.ad)}">`).join('')}
             </datalist>
@@ -579,19 +656,19 @@
           <div class="field">
             <label>Sipariş türü</label>
             <select id="sipTur">
-              <option value="satis">Satış (ben veriyorum)</option>
-              <option value="alis">Alış (ben alıyorum)</option>
+              <option value="satis" ${editing && editing.tur === 'satis' ? 'selected' : ''}>Satış (ben veriyorum)</option>
+              <option value="alis" ${editing && editing.tur === 'alis' ? 'selected' : ''}>Alış (ben alıyorum)</option>
             </select>
           </div>
         </div>
         <div class="grid grid-2">
           <div class="field" style="max-width:220px;">
             <label>Tarih</label>
-            <input type="date" id="sipTarih" value="${todayISO()}">
+            <input type="date" id="sipTarih" value="${editing ? editing.tarih : todayISO()}">
           </div>
           <div class="field">
             <label style="display:block;">Teslimat</label>
-            <label style="font-weight:400; font-size:13.5px;"><input type="checkbox" id="sipTeslimEdildi" checked style="width:auto; margin-right:6px;">Teslim edildi (işaretsiz bırakırsan "bekliyor" olarak kaydedilir)</label>
+            <label style="font-weight:400; font-size:13.5px;"><input type="checkbox" id="sipTeslimEdildi" ${(!editing || editing.teslimEdildi) ? 'checked' : ''} style="width:auto; margin-right:6px;">Teslim edildi (işaretsiz bırakırsan "bekliyor" olarak kaydedilir)</label>
           </div>
         </div>
 
@@ -616,52 +693,58 @@
           <div class="field">
             <label>İrsaliye toplam tutarı (yaklaşık dağıtım için gerekli, yoksa kalemlerden hesaplanır)</label>
             <div style="display:flex; gap:8px;">
-              <input type="number" step="0.01" id="sipManuelToplam" placeholder="örn. 500" style="flex:1;">
+              <input type="number" step="0.01" id="sipManuelToplam" placeholder="örn. 500" style="flex:1;" value="${editing ? editing.toplamTutar : ''}">
               <button type="button" id="yaklasikDagitBtn" class="btn btn-ghost btn-sm" style="white-space:nowrap;">Yaklaşık Dağıt</button>
             </div>
           </div>
           <div class="field">
             <label>Ödeme türü</label>
             <select id="sipOdemeTuru">
-              ${state.odemeTurleri.map(t => `<option>${esc(t)}</option>`).join('')}
-              <option value="diger">Diğer (yaz)</option>
+              ${state.odemeTurleri.map(t => `<option ${editing && editing.odemeTuru === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+              <option value="diger" ${editing && !state.odemeTurleri.includes(editing.odemeTuru) ? 'selected' : ''}>Diğer (yaz)</option>
             </select>
-            <input type="text" id="sipOdemeDiger" placeholder="Ödeme türünü yaz" class="hidden mt-4">
+            <input type="text" id="sipOdemeDiger" placeholder="Ödeme türünü yaz" class="hidden mt-4" value="${editing && !state.odemeTurleri.includes(editing.odemeTuru) ? esc(editing.odemeTuru) : ''}">
           </div>
         </div>
         <div class="grid grid-2">
           <div class="field">
             <label>Ödenen tutar</label>
-            <input type="number" step="0.01" id="sipOdenen" value="0">
+            <input type="number" step="0.01" id="sipOdenen" value="${editing ? editing.odenenTutar : 0}">
           </div>
           <div class="field">
             <label>Not</label>
-            <input type="text" id="sipNot" placeholder="Opsiyonel">
+            <input type="text" id="sipNot" placeholder="Opsiyonel" value="${editing ? esc(editing.notlar || '') : ''}">
           </div>
         </div>
 
         <div style="display:flex; align-items:center; gap:16px;">
           <div class="mono" style="font-size:18px;">Toplam: <span id="sipToplamGoster">0,00 TL</span></div>
           <div class="spacer"></div>
-          <button id="sipKaydetBtn" class="btn btn-amber">Siparişi Kaydet</button>
+          <button id="sipKaydetBtn" class="btn btn-amber">${editing ? 'Değişiklikleri Kaydet' : 'Siparişi Kaydet'}</button>
         </div>
-      </div>`;
+      </div>
+      <div id="sonSiparislerKutu" class="card mt-4"></div>`;
 
     let kalemSayac = 0;
     const kalemList = document.getElementById('kalemList');
 
-    function kalemSatiriEkle() {
+    function kalemSatiriEkle(mevcut) {
       kalemSayac++;
       const rid = 'k' + kalemSayac;
       const row = document.createElement('div');
       row.className = 'line-item-row';
       row.id = rid;
+      const ad = mevcut ? esc(mevcut.urunAdi) : '';
+      const birim = mevcut ? esc(mevcut.birim || 'adet') : 'adet';
+      const adet = mevcut ? mevcut.adet : 1;
+      const kdv = mevcut ? mevcut.kdvOrani : 20;
+      const fiyat = mevcut ? mevcut.birimFiyat : '';
       row.innerHTML = `
-        <input class="k-urun-ad" type="text" list="urunListesi" placeholder="Ürün adı (seç ya da yaz)" autocomplete="off">
-        <input class="k-birim" type="text" list="birimListesi" placeholder="Birim" value="adet" autocomplete="off">
-        <input class="k-adet" type="number" step="0.01" placeholder="Adet" value="1">
-        <input class="k-kdv" type="number" placeholder="KDV%" value="20">
-        <input class="k-fiyat" type="number" step="0.01" placeholder="Birim fiyat">
+        <input class="k-urun-ad" type="text" list="urunListesi" placeholder="Ürün adı (seç ya da yaz)" autocomplete="off" value="${ad}">
+        <input class="k-birim" type="text" list="birimListesi" placeholder="Birim" value="${birim}" autocomplete="off">
+        <input class="k-adet" type="number" step="0.01" placeholder="Adet" value="${adet}">
+        <input class="k-kdv" type="number" placeholder="KDV%" value="${kdv}">
+        <input class="k-fiyat" type="number" step="0.01" placeholder="Birim fiyat" value="${fiyat}">
         <div class="k-tutar">0,00 TL</div>
         <label class="k-yaklasik-label" title="Fiyat tahmini, adet otomatik hesaplansın"><input type="checkbox" class="k-yaklasik">Yklş</label>
         <button type="button" class="icon-btn" title="Kaldır">✕</button>
@@ -702,8 +785,12 @@
       satirTutarGuncelle();
       toplamGuncelle();
     }
-    document.getElementById('kalemEkleBtn').addEventListener('click', kalemSatiriEkle);
-    kalemSatiriEkle();
+    document.getElementById('kalemEkleBtn').addEventListener('click', () => kalemSatiriEkle());
+    if (editing && editing.kalemler && editing.kalemler.length) {
+      editing.kalemler.forEach(k => kalemSatiriEkle(k));
+    } else {
+      kalemSatiriEkle();
+    }
 
     function toplananHesapla() {
       let toplam = 0;
@@ -779,6 +866,11 @@
         satirlar.push({ ad, birim, adet, fiyat, kdv });
       });
       if (satirlar.length === 0) return toast('En az bir geçerli kalem ekleyin (yaklaşık işaretliyse Yaklaşık Dağıt\'a basmayı unutma)', true);
+      const eksikFiyat = satirlar.some(s => !s.fiyat || s.fiyat <= 0);
+      if (eksikFiyat) return toast('Her kalem için birim fiyat girilmeli (bilmiyorsan "Yklş" işaretleyip Yaklaşık Dağıt kullan)', true);
+
+      const onay = await confirmDialog(editing ? `#${editing.siraNo} numaralı siparişteki değişiklikleri kaydetmek istediğine emin misin?` : 'Bu siparişi kaydetmek istediğine emin misin?');
+      if (!onay) return;
 
       btn.disabled = true;
       try {
@@ -830,6 +922,7 @@
         const hesaplananToplam = round2(kalemler.reduce((t, k) => t + k.tutar, 0));
         const payload = {
           isletmeId: isletme.id,
+          isletmeAdi: isletme.ad,
           tur: document.getElementById('sipTur').value === 'alis' ? 'alis' : 'satis',
           tarih: document.getElementById('sipTarih').value || todayISO(),
           kalemler,
@@ -838,10 +931,18 @@
           odenenTutar: round2(Number(document.getElementById('sipOdenen').value) || 0),
           notlar: document.getElementById('sipNot').value,
           olusturanKullanici: state.username || '',
+          duzenleyen: state.username || '',
           teslimEdildi: document.getElementById('sipTeslimEdildi').checked
         };
-        const sip = await fsAddSiparis(payload);
-        toast('Sipariş kaydedildi (No: ' + sip.siraNo + ')');
+
+        if (editing) {
+          await fsUpdateSiparisFull(editing, payload);
+          toast('Sipariş güncellendi (No: ' + editing.siraNo + ')');
+          state.editingSiparis = null;
+        } else {
+          const sip = await fsAddSiparis(payload);
+          toast('Sipariş kaydedildi (No: ' + sip.siraNo + ')');
+        }
         await refreshLookups();
         setView('siparisler');
       } catch (err) {
@@ -850,6 +951,28 @@
         btn.disabled = false;
       }
     });
+
+    if (editing) {
+      document.getElementById('sipDuzenleIptalBtn').addEventListener('click', () => {
+        state.editingSiparis = null;
+        renderSiparisOlustur();
+      });
+    }
+
+    // Sayfanın altında son siparişleri göster
+    (async () => {
+      const kutu = document.getElementById('sonSiparislerKutu');
+      try {
+        const tumu = await fsGetAllSiparisler();
+        tumu.sort((a, b) => (a.tarih < b.tarih ? 1 : (a.tarih > b.tarih ? -1 : (b.siraNo || 0) - (a.siraNo || 0))));
+        const son = tumu.slice(0, 6);
+        kutu.innerHTML = `<h3 style="font-size:14px; margin-bottom:10px;">Son Siparişler</h3>` + (son.length ? `
+          <table><thead><tr><th>Tarih</th><th>İşletme</th><th>Tür</th><th class="text-right">Tutar</th><th></th></tr></thead><tbody>
+          ${son.map(s => `<tr><td>${formatTarih(s.tarih)}</td><td>${esc(s.isletmeAdi)}</td><td><span class="badge badge-${s.tur}">${s.tur === 'satis' ? 'Satış' : 'Alış'}</span></td><td class="text-right mono">${money(s.toplamTutar)}</td><td class="text-right"><button class="btn btn-ghost btn-sm" data-goster="${s.id}">Görüntüle</button></td></tr>`).join('')}
+          </tbody></table>` : `<div class="empty-state">Henüz sipariş yok.</div>`);
+        kutu.querySelectorAll('button[data-goster]').forEach(b => b.addEventListener('click', () => setView('siparisler')));
+      } catch (err) { /* sessiz geç */ }
+    })();
   }
 
   // ================= SİPARİŞLER =================
@@ -904,6 +1027,7 @@
             </div>
             <div class="oc-tutar mono">${money(s.toplamTutar)}</div>
             <div class="oc-actions">
+              <button class="btn btn-ghost btn-sm" data-duzenle="${s.id}">Düzenle</button>
               <button class="btn btn-ghost btn-sm" data-pdf="${s.id}">Yazdır / İndir</button>
               <button class="btn btn-danger btn-sm" data-sil="${s.id}">Sil</button>
             </div>
@@ -912,10 +1036,16 @@
             <table><thead><tr><th>Ürün</th><th class="text-right">Adet</th><th>Birim</th><th class="text-right">Birim Fiyat</th><th class="text-right">KDV</th><th class="text-right">Tutar</th></tr></thead>
             <tbody>${kalemSatirlariHtml(s)}</tbody></table>
             <div class="mt-4">
+              <div class="sub" style="font-size:12.5px;">Sipariş tarihi: <strong>${formatTarih(s.tarih)}</strong>${s.sonDuzenlemeTarihi ? ` · Son düzenleme: ${formatTarih(s.sonDuzenlemeTarihi)} (${esc(s.sonDuzenleyen||'')})` : ''}</div>
               <div class="sub" style="font-size:12.5px;">Ödeme türü: <strong>${esc(s.odemeTuru)}</strong></div>
               <div class="sub" style="font-size:12.5px;">Ödenen: <strong class="mono">${money(s.odenenTutar||0)}</strong> · Kalan: <strong class="mono">${money(kalan(s))}</strong></div>
               ${s.notlar ? `<div class="sub" style="font-size:12.5px;">Not: ${esc(s.notlar)}</div>` : ''}
             </div>
+            ${kalan(s) > 0 ? `
+            <div style="display:flex; gap:8px; align-items:center; margin-top:12px;">
+              <input type="number" step="0.01" class="odeme-ekle-input" placeholder="Ödeme tutarı" style="max-width:160px; padding:8px 10px; border-radius:8px; border:1.5px solid var(--line);">
+              <button class="btn btn-primary btn-sm" data-odeme-ekle="${s.id}" data-kalan="${kalan(s)}">Ödeme Ekle</button>
+            </div>` : ''}
           </div>
         </div>`).join('');
 
@@ -928,6 +1058,29 @@
         e.stopPropagation();
         const s = liste.find(x => x.id === btn.dataset.pdf);
         try { await irsaliyePdfOlusturVeAc(s); } catch (err) { toast('PDF oluşturulamadı: ' + err.message, true); }
+      }));
+      host.querySelectorAll('button[data-duzenle]').forEach(btn => btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const s = liste.find(x => x.id === btn.dataset.duzenle);
+        state.editingSiparis = s;
+        setView('siparis');
+      }));
+      host.querySelectorAll('button[data-odeme-ekle]').forEach(btn => btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const row = btn.closest('.order-detail');
+        const input = row.querySelector('.odeme-ekle-input');
+        const tutar = Number(input.value);
+        if (!tutar || tutar <= 0) return toast('Geçerli bir ödeme tutarı gir', true);
+        const kalanTutar = Number(btn.dataset.kalan);
+        if (tutar > kalanTutar + 0.01) {
+          const devam = await confirmDialog(`Girdiğin tutar (${money(tutar)}), kalan borçtan (${money(kalanTutar)}) fazla. Yine de eklensin mi?`);
+          if (!devam) return;
+        }
+        try {
+          await fsOdemeEkle(btn.dataset.odemeEkle, tutar);
+          toast('Ödeme eklendi');
+          renderSiparisler();
+        } catch (err) { toast(err.message, true); }
       }));
       host.querySelectorAll('button[data-sil]').forEach(btn => btn.addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -1243,6 +1396,29 @@
             <button id="yeniOdemeEkleBtn" class="btn btn-ghost btn-sm">Ekle</button>
           </div>
         </div>
+      </div>
+      <div class="grid grid-2 mt-4">
+        <div class="card">
+          <h3 style="font-size:15px; margin-bottom:14px;">Hızlı Ürün Ekle</h3>
+          <div class="field"><label>Ürün adı</label><input id="aySpUrunAd" type="text"></div>
+          <div class="grid grid-2">
+            <div class="field"><label>Birim</label><input id="aySpUrunBirim" type="text" list="birimListesiAyarlar" value="adet"></div>
+            <div class="field"><label>Satış fiyatı (KDV dahil)</label><input id="aySpUrunFiyat" type="number" step="0.01"></div>
+          </div>
+          <div class="field"><label>KDV oranı %</label><input id="aySpUrunKdv" type="number" value="20"></div>
+          <datalist id="birimListesiAyarlar">${state.birimler.map(b => `<option value="${esc(b)}">`).join('')}</datalist>
+          <button id="aySpUrunEkleBtn" class="btn btn-primary btn-sm">Ürün Ekle</button>
+        </div>
+        <div class="card">
+          <h3 style="font-size:15px; margin-bottom:14px;">Hızlı İşletme Ekle</h3>
+          <div class="field"><label>İşletme adı</label><input id="aySpIsletmeAd" type="text"></div>
+          <div class="grid grid-2">
+            <div class="field"><label>Telefon</label><input id="aySpIsletmeTel" type="text"></div>
+            <div class="field"><label>Vergi No</label><input id="aySpIsletmeVergi" type="text"></div>
+          </div>
+          <div class="field"><label>Adres</label><input id="aySpIsletmeAdres" type="text"></div>
+          <button id="aySpIsletmeEkleBtn" class="btn btn-primary btn-sm">İşletme Ekle</button>
+        </div>
       </div>`;
 
     const firma = await fsGetFirma();
@@ -1311,12 +1487,45 @@
       try { await fsSetOdemeTurleri([...liste, v]); document.getElementById('yeniOdemeInput').value=''; toast('Ödeme türü eklendi'); odemeTurleriCiz(); }
       catch (err) { toast(err.message, true); }
     });
+
+    document.getElementById('aySpUrunEkleBtn').addEventListener('click', async () => {
+      const ad = document.getElementById('aySpUrunAd').value.trim();
+      if (!ad) return toast('Ürün adı gerekli', true);
+      try {
+        await fsAddUrun({
+          ad, kategori: '', birim: document.getElementById('aySpUrunBirim').value.trim() || 'adet',
+          satisFiyati: Number(document.getElementById('aySpUrunFiyat').value) || 0,
+          kdvOrani: Number(document.getElementById('aySpUrunKdv').value) || 0,
+          stokTakibi: false, stokAdedi: null, kritikStok: null
+        });
+        toast('Ürün eklendi: ' + ad);
+        document.getElementById('aySpUrunAd').value = '';
+        document.getElementById('aySpUrunFiyat').value = '';
+      } catch (err) { toast(err.message, true); }
+    });
+
+    document.getElementById('aySpIsletmeEkleBtn').addEventListener('click', async () => {
+      const ad = document.getElementById('aySpIsletmeAd').value.trim();
+      if (!ad) return toast('İşletme adı gerekli', true);
+      try {
+        await fsAddIsletme({
+          ad, telefon: document.getElementById('aySpIsletmeTel').value.trim(),
+          vergiNo: document.getElementById('aySpIsletmeVergi').value.trim(),
+          adres: document.getElementById('aySpIsletmeAdres').value.trim(), notlar: ''
+        });
+        toast('İşletme eklendi: ' + ad);
+        document.getElementById('aySpIsletmeAd').value = '';
+        document.getElementById('aySpIsletmeTel').value = '';
+        document.getElementById('aySpIsletmeVergi').value = '';
+        document.getElementById('aySpIsletmeAdres').value = '';
+      } catch (err) { toast(err.message, true); }
+    });
   }
 
   // ================= TEKLİF HAZIRLA =================
   function renderTeklif() {
     main.innerHTML = `
-      <div class="page-header"><div><h1>Teklif Hazırla</h1><div class="sub">İşletme ve ürünleri gir, farklı bütçelere göre 3 teklif otomatik hesaplansın</div></div></div>
+      <div class="page-header"><div><h1>Teklif Hazırla</h1><div class="sub">Ürün miktarı 1. teklife göre sabitlenir, 2. ve 3. teklifte sadece birim fiyat değişir</div></div></div>
       <div class="card">
         <div class="field" style="max-width:420px;">
           <label>İşletme adı</label>
@@ -1326,22 +1535,25 @@
 
         <h3 style="font-size:14px; margin:18px 0 4px;">Ürünler</h3>
         <p class="sub" style="color:var(--ink-soft); font-size:12px; margin:0 0 10px;">
-          Her ürün için sadece tahmini birim fiyat yeterli — adet, her teklif bütçesine göre otomatik hesaplanır.
+          Her ürün için 1, 2 ve 3. teklife ait tahmini birim maliyetleri gir (örn. eldiven için 25 / 30 / 35 TL).
+          Miktar sadece 1. teklif tutarına göre hesaplanır ve her üç teklifte de aynı kalır — sadece fiyat değişir.
+          2. ve 3. maliyeti boş bırakırsan 1. maliyetle aynı kabul edilir.
         </p>
-        <div class="line-item-header" style="grid-template-columns:2fr 1fr 1fr auto;">
-          <span>Ürün Adı</span><span>Birim</span><span>Yaklaşık Birim Fiyat</span><span></span>
+        <div class="line-item-header" style="grid-template-columns:1.8fr 0.8fr 0.8fr 0.8fr 0.8fr auto;">
+          <span>Ürün Adı</span><span>Birim</span><span>Maliyet 1</span><span>Maliyet 2</span><span>Maliyet 3</span><span></span>
         </div>
         <datalist id="urunListesiTeklif">${state.urunler.map(u => `<option value="${esc(u.ad)}">`).join('')}</datalist>
         <datalist id="birimListesiTeklif">${state.birimler.map(b => `<option value="${esc(b)}">`).join('')}</datalist>
         <div id="teklifKalemList"></div>
         <button id="teklifKalemEkleBtn" type="button" class="btn btn-ghost btn-sm">+ Ürün ekle</button>
 
-        <h3 style="font-size:14px; margin:18px 0 10px;">Teklif Tutarları</h3>
-        <div class="grid" style="grid-template-columns:1fr 1fr 1fr;">
-          <div class="field"><label>1. Teklif</label><input type="number" step="0.01" id="teklifTutar1" placeholder="örn. 500"></div>
-          <div class="field"><label>2. Teklif</label><input type="number" step="0.01" id="teklifTutar2" placeholder="örn. 750"></div>
-          <div class="field"><label>3. Teklif</label><input type="number" step="0.01" id="teklifTutar3" placeholder="örn. 1000"></div>
+        <h3 style="font-size:14px; margin:18px 0 10px;">1. Teklif Hedef Toplam Tutar</h3>
+        <div class="field" style="max-width:220px;">
+          <input type="number" step="0.01" id="teklifHedef1" placeholder="örn. 500">
         </div>
+        <p class="sub" style="color:var(--ink-soft); font-size:12px; margin:6px 0 14px;">
+          2. ve 3. teklifin toplamı, bu tutardan hesaplanan miktar × kendi maliyetlerine göre otomatik çıkar — ayrıca tutar girmene gerek yok.
+        </p>
         <button id="teklifHesaplaBtn" class="btn btn-amber">3 Teklifi Hesapla</button>
       </div>
       <div id="teklifSonuclar" class="mt-4"></div>`;
@@ -1352,18 +1564,20 @@
       sayac++;
       const row = document.createElement('div');
       row.className = 'line-item-row';
-      row.style.gridTemplateColumns = '2fr 1fr 1fr auto';
+      row.style.gridTemplateColumns = '1.8fr 0.8fr 0.8fr 0.8fr 0.8fr auto';
       row.innerHTML = `
         <input class="t-ad" type="text" list="urunListesiTeklif" placeholder="Ürün adı" autocomplete="off">
         <input class="t-birim" type="text" list="birimListesiTeklif" placeholder="Birim" value="adet" autocomplete="off">
-        <input class="t-fiyat" type="number" step="0.01" placeholder="örn. 10">
+        <input class="t-m1" type="number" step="0.01" placeholder="örn. 25">
+        <input class="t-m2" type="number" step="0.01" placeholder="örn. 30">
+        <input class="t-m3" type="number" step="0.01" placeholder="örn. 35">
         <button type="button" class="icon-btn" title="Kaldır">✕</button>
       `;
       list.appendChild(row);
       row.querySelector('.t-ad').addEventListener('input', (e) => {
         const eslesen = state.urunler.find(u => u.ad.toLowerCase() === e.target.value.trim().toLowerCase());
         if (eslesen) {
-          row.querySelector('.t-fiyat').value = eslesen.satisFiyati;
+          row.querySelector('.t-m1').value = eslesen.satisFiyati;
           if (eslesen.birim) row.querySelector('.t-birim').value = eslesen.birim;
         }
       });
@@ -1376,30 +1590,45 @@
 
     document.getElementById('teklifHesaplaBtn').addEventListener('click', () => {
       const isletmeAdi = document.getElementById('teklifIsletme').value.trim();
-      const kalemler = [];
+      const satirlar = [];
       list.querySelectorAll('.line-item-row').forEach(row => {
         const ad = row.querySelector('.t-ad').value.trim();
         const birim = row.querySelector('.t-birim').value.trim() || 'adet';
-        const fiyat = Number(row.querySelector('.t-fiyat').value) || 0;
-        if (ad && fiyat > 0) kalemler.push({ ad, birim, yaklasikFiyat: fiyat });
+        const m1 = Number(row.querySelector('.t-m1').value) || 0;
+        const m2 = Number(row.querySelector('.t-m2').value) || 0;
+        const m3 = Number(row.querySelector('.t-m3').value) || 0;
+        if (ad && m1 > 0) satirlar.push({ ad, birim, m1, m2: m2 > 0 ? m2 : m1, m3: m3 > 0 ? m3 : m1 });
       });
-      if (!kalemler.length) return toast('En az bir ürün ve tahmini fiyatını gir', true);
+      if (!satirlar.length) return toast('En az bir ürün ve 1. maliyetini gir', true);
 
-      const hedefler = [1, 2, 3].map(n => Number(document.getElementById('teklifTutar' + n).value) || 0).filter(v => v > 0);
-      if (!hedefler.length) return toast('En az bir teklif tutarı gir', true);
+      const hedef1 = Number(document.getElementById('teklifHedef1').value) || 0;
+      if (hedef1 <= 0) return toast('1. teklif için hedef toplam tutar gir', true);
 
-      sonTeklifler = hedefler.map(hedef => {
-        const dagitim = hesaplaDagitim(kalemler, hedef);
-        const toplam = round2(dagitim.reduce((t, k) => t + k.tutar, 0));
-        return { hedef, kalemler: dagitim, toplam };
-      });
+      const dagitim1 = hesaplaDagitim(satirlar.map(s => ({ ad: s.ad, birim: s.birim, yaklasikFiyat: s.m1 })), hedef1);
+      if (!dagitim1) return toast('Dağıtım hesaplanamadı, maliyetleri kontrol et', true);
+
+      const teklif1 = { hedef: hedef1, kalemler: dagitim1, toplam: round2(dagitim1.reduce((t, k) => t + k.tutar, 0)) };
+      const teklif2 = { hedef: null, kalemler: satirlar.map((s, idx) => {
+        const adet = dagitim1[idx].adet;
+        const tutar = round2(adet * s.m2);
+        return { ad: s.ad, birim: s.birim, adet, birimFiyat: s.m2, tutar };
+      })};
+      teklif2.toplam = round2(teklif2.kalemler.reduce((t, k) => t + k.tutar, 0));
+      const teklif3 = { hedef: null, kalemler: satirlar.map((s, idx) => {
+        const adet = dagitim1[idx].adet;
+        const tutar = round2(adet * s.m3);
+        return { ad: s.ad, birim: s.birim, adet, birimFiyat: s.m3, tutar };
+      })};
+      teklif3.toplam = round2(teklif3.kalemler.reduce((t, k) => t + k.tutar, 0));
+
+      sonTeklifler = [teklif1, teklif2, teklif3];
 
       const host = document.getElementById('teklifSonuclar');
       host.innerHTML = `
-        <div class="grid" style="grid-template-columns:repeat(${sonTeklifler.length}, 1fr); gap:16px;">
+        <div class="grid" style="grid-template-columns:repeat(3, 1fr); gap:16px;">
           ${sonTeklifler.map((t, i) => `
             <div class="card">
-              <h3 style="font-size:14px; margin-bottom:4px;">Teklif ${i + 1} <span class="sub" style="font-weight:400;">(hedef ${money(t.hedef)})</span></h3>
+              <h3 style="font-size:14px; margin-bottom:4px;">Teklif ${i + 1}${i === 0 ? ` <span class="sub" style="font-weight:400;">(hedef ${money(t.hedef)})</span>` : ''}</h3>
               <table><thead><tr><th>Ürün</th><th class="text-right">Adet</th><th>Birim</th><th class="text-right">B. Fiyat</th><th class="text-right">Tutar</th></tr></thead>
               <tbody>${t.kalemler.map(k => `<tr><td>${esc(k.ad)}</td><td class="text-right mono">${k.adet}</td><td>${esc(k.birim)}</td><td class="text-right mono">${money(k.birimFiyat)}</td><td class="text-right mono">${money(k.tutar)}</td></tr>`).join('')}</tbody></table>
               <div class="mono text-right mt-4" style="font-size:15px;">Toplam: ${money(t.toplam)}</div>

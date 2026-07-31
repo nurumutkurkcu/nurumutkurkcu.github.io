@@ -82,3 +82,23 @@ diğerlerine (manifest.json, icon'lar, firestore.rules) dokunmana gerek yok.
   fiyatlarıyla) gir, 3 farklı bütçe tutarı yaz, "3 Teklifi Hesapla" — sistem
   her bütçe için adet/fiyatı otomatik hesaplar (yaklaşık dağıtım mantığıyla,
   bütçeyi hiç aşmadan). Tek PDF'te (3 sayfa) indir/yazdır.
+
+## Bu sürümde eklenenler (4. güncelleme)
+- **Mobil uyum:** Site artık telefon ekranına otomatik uyum sağlıyor —
+  hamburger menü, kayan kenar çubuğu, tüm tablolar ve kartlar dar ekranda
+  düzgün görünüyor.
+- **Sipariş düzenleme:** Siparişler sayfasında "Düzenle" ile hatalı girilen
+  bir siparişi (kalemler, tutar, tarih, ödeme, teslimat — hepsi) sonradan
+  düzeltebilirsin. Stok etkisi otomatik olarak doğru şekilde yeniden hesaplanır.
+- **Kaydetmeden önce onay:** Hem yeni sipariş hem düzenleme kaydından önce
+  onay penceresi çıkar.
+- **Ödeme ekleme:** Sipariş detayında, kalan borcu olan siparişlere sonradan
+  gelen ödemeyi ekleyebilirsin — ödenen/kalan otomatik güncellenir.
+- **Silinen sipariş numaraları korunuyor:** Bir sipariş silindiğinde numarası
+  bir daha asla kullanılmaz, ayrıca ayrı bir kayıt defterinde tutulur.
+- **Teklif Hazırla yeniden tasarlandı:** Artık ürün miktarı 1. teklife göre
+  hesaplanıp sabitleniyor; 2. ve 3. teklifte sadece birim maliyeti değiştirip
+  aynı miktar üzerinden farklı toplamlar görebiliyorsun.
+- **Ayarlar'a hızlı ürün/işletme ekleme** kartları eklendi.
+- Kalem satırında fiyat girilmeden kaydetmeye çalışırsan artık uyarı alırsın
+  (yaklaşık işaretlenmemişse hem adet hem fiyat zorunlu).
