@@ -122,3 +122,12 @@ diğerlerine (manifest.json, icon'lar, firestore.rules) dokunmana gerek yok.
   net durumunu gösteren bir özet paneli çıkıyor.
 - Sipariş kalemlerinde adet alanına sık kullanılan değerler (1, 2, 5, 10,
   12, 24, 50, 100...) öneri olarak eklendi.
+
+## Bu sürümde eklenenler (6. güncelleme)
+- **Gerçek "tıkla-aç" açılır pencereler:** İşletme, Ürün Adı, Birim ve Adet
+  alanlarının hepsi (Sipariş Oluştur, Teklif Hazırla, Ürünler formu, Ayarlar
+  hızlı ekleme) artık tarayıcıya bağlı eski `datalist` davranışı yerine,
+  kutuya tıklar tıklamaz listeyi aşağı açan, yazarken filtreleyen, ok
+  tuşlarıyla gezilebilen kendi açılır pencere bileşenimizi kullanıyor.
+  Listede yoksa elle yazabilirsin, kaydettiğinde otomatik olarak listeye
+  eklenir ve bir sonraki seferde seçenek olarak çıkar.

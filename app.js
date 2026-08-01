@@ -88,6 +88,65 @@
     a.click();
   }
 
+  // ---------- Tıkla-aç açılır pencere (combobox): listeden seç ya da elle yaz ----------
+  function attachCombobox(inputEl, getOptions, onSelect) {
+    let dropdown = null, items = [], activeIndex = -1;
+    function closeDropdown() { if (dropdown) { dropdown.remove(); dropdown = null; } activeIndex = -1; }
+    function selectOption(opt) {
+      inputEl.value = opt;
+      closeDropdown();
+      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      if (onSelect) onSelect(opt);
+    }
+    function render() {
+      if (!dropdown) return;
+      dropdown.innerHTML = '';
+      if (!items.length) {
+        const bos = document.createElement('div');
+        bos.className = 'combo-empty';
+        bos.textContent = 'Eşleşme yok — elle yazıp devam edebilirsin';
+        dropdown.appendChild(bos);
+        return;
+      }
+      items.forEach((opt, idx) => {
+        const item = document.createElement('div');
+        item.className = 'combo-item' + (idx === activeIndex ? ' active' : '');
+        item.textContent = opt;
+        item.addEventListener('mousedown', (e) => { e.preventDefault(); selectOption(opt); });
+        dropdown.appendChild(item);
+      });
+    }
+    function openDropdown(filterText) {
+      const all = getOptions();
+      const q = (filterText || '').toLowerCase();
+      items = q ? all.filter(o => o.toLowerCase().includes(q)) : all.slice();
+      if (!dropdown) {
+        dropdown = document.createElement('div');
+        dropdown.className = 'combo-dropdown';
+        document.body.appendChild(dropdown);
+      }
+      const rect = inputEl.getBoundingClientRect();
+      dropdown.style.left = rect.left + 'px';
+      dropdown.style.top = (rect.bottom + 2) + 'px';
+      dropdown.style.width = rect.width + 'px';
+      activeIndex = -1;
+      render();
+    }
+    inputEl.addEventListener('focus', () => openDropdown(inputEl.value));
+    inputEl.addEventListener('click', () => openDropdown(inputEl.value));
+    inputEl.addEventListener('input', () => openDropdown(inputEl.value));
+    inputEl.addEventListener('blur', () => setTimeout(closeDropdown, 150));
+    inputEl.addEventListener('keydown', (e) => {
+      if (!dropdown) return;
+      if (e.key === 'ArrowDown') { e.preventDefault(); activeIndex = Math.min(activeIndex + 1, items.length - 1); render(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); activeIndex = Math.max(activeIndex - 1, 0); render(); }
+      else if (e.key === 'Enter') { if (activeIndex >= 0 && items[activeIndex]) { e.preventDefault(); selectOption(items[activeIndex]); } }
+      else if (e.key === 'Escape') { closeDropdown(); }
+    });
+    window.addEventListener('scroll', closeDropdown, true);
+    window.addEventListener('resize', closeDropdown);
+  }
+
   // ================= FIRESTORE VERİ KATMANI =================
   const col = {
     urunler: db.collection('urunler'),
@@ -673,10 +732,7 @@
         <div class="grid grid-2">
           <div class="field">
             <label>İşletme</label>
-            <input type="text" id="sipIsletme" list="isletmeListesi" placeholder="Mevcut işletmeyi seç ya da yeni ad yaz" autocomplete="off" value="${esc(editing ? editing.isletmeAdi : '')}">
-            <datalist id="isletmeListesi">
-              ${state.isletmeler.map(i => `<option value="${esc(i.ad)}">`).join('')}
-            </datalist>
+            <input type="text" id="sipIsletme" placeholder="Mevcut işletmeyi seç ya da yeni ad yaz" autocomplete="off" value="${esc(editing ? editing.isletmeAdi : '')}">
           </div>
           <div class="field">
             <label>Sipariş türü</label>
@@ -702,15 +758,6 @@
           Fiyatını tam bilmediğin kalemleri "Yklş" ile işaretle, tahmini fiyatını yaz, adedi boş bırak —
           aşağıdaki toplam tutara göre sistem adet ve birim fiyatı otomatik hesaplar.
         </p>
-        <datalist id="urunListesi">
-          ${state.urunler.map(u => `<option value="${esc(u.ad)}">`).join('')}
-        </datalist>
-        <datalist id="birimListesi">
-          ${state.birimler.map(b => `<option value="${esc(b)}">`).join('')}
-        </datalist>
-        <datalist id="adetOneriListesi">
-          ${[1,2,3,5,10,12,20,24,50,100].map(n => `<option value="${n}">`).join('')}
-        </datalist>
         <div class="line-item-header">
           <span>Ürün Adı</span><span>Birim</span><span>Adet</span><span>KDV%</span><span>Birim Fiyat</span><span>Tutar</span><span>Yaklaşık</span><span></span>
         </div>
@@ -755,6 +802,7 @@
 
     let kalemSayac = 0;
     const kalemList = document.getElementById('kalemList');
+    attachCombobox(document.getElementById('sipIsletme'), () => state.isletmeler.map(i => i.ad));
 
     function kalemSatiriEkle(mevcut) {
       kalemSayac++;
@@ -768,9 +816,9 @@
       const kdv = mevcut ? mevcut.kdvOrani : 20;
       const fiyat = mevcut ? mevcut.birimFiyat : '';
       row.innerHTML = `
-        <input class="k-urun-ad" type="text" list="urunListesi" placeholder="Ürün adı (seç ya da yaz)" autocomplete="off" value="${ad}">
-        <input class="k-birim" type="text" list="birimListesi" placeholder="Birim" value="${birim}" autocomplete="off">
-        <input class="k-adet" type="number" step="0.01" placeholder="Adet" value="${adet}" list="adetOneriListesi">
+        <input class="k-urun-ad" type="text" placeholder="Ürün adı (seç ya da yaz)" autocomplete="off" value="${ad}">
+        <input class="k-birim" type="text" placeholder="Birim" value="${birim}" autocomplete="off">
+        <input class="k-adet" type="number" step="0.01" placeholder="Adet" value="${adet}">
         <input class="k-kdv" type="number" placeholder="KDV%" value="${kdv}">
         <input class="k-fiyat" type="number" step="0.01" placeholder="Birim fiyat" value="${fiyat}">
         <div class="k-tutar">0,00 TL</div>
@@ -801,6 +849,9 @@
           toplamGuncelle();
         }
       });
+      attachCombobox(adInput, () => state.urunler.map(u => u.ad));
+      attachCombobox(birimInput, () => state.birimler);
+      attachCombobox(adetInput, () => ['1','2','3','5','10','12','20','24','50','100']);
       yaklasikCb.addEventListener('change', () => {
         adetInput.disabled = yaklasikCb.checked;
         adetInput.placeholder = yaklasikCb.checked ? 'Otomatik' : 'Adet';
@@ -1342,17 +1393,17 @@
         <div class="grid grid-2">
           <div class="field"><label>Ürün adı</label><input id="uAd" type="text" value="${esc(u.ad)}"></div>
           <div class="field"><label>Kategori</label><input id="uKategori" type="text" value="${esc(u.kategori)}"></div>
-          <div class="field"><label>Birim</label><input id="uBirim" type="text" list="birimListesiUrun" value="${esc(u.birim)}"></div>
+          <div class="field"><label>Birim</label><input id="uBirim" type="text" value="${esc(u.birim)}"></div>
           <div class="field"><label>Satış fiyatı (KDV dahil)</label><input id="uFiyat" type="number" step="0.01" value="${u.satisFiyati}"></div>
           <div class="field"><label>KDV oranı %</label><input id="uKdv" type="number" value="${u.kdvOrani}"></div>
           <div class="field"><label><input id="uStokTakibi" type="checkbox" ${u.stokTakibi ? 'checked' : ''} style="width:auto; margin-right:6px;">Stok takibi yapılsın</label></div>
         </div>
-        <datalist id="birimListesiUrun">${state.birimler.map(b => `<option value="${esc(b)}">`).join('')}</datalist>
         <div id="uStokAlanlari" class="grid grid-2 ${u.stokTakibi ? '' : 'hidden'}">
           <div class="field"><label>Stok adedi</label><input id="uStokAdedi" type="number" value="${u.stokAdedi ?? ''}"></div>
           <div class="field"><label>Kritik stok seviyesi</label><input id="uKritikStok" type="number" value="${u.kritikStok ?? ''}"></div>
         </div>
         <button id="uKaydetBtn" class="btn btn-primary">Kaydet</button>`;
+      attachCombobox(document.getElementById('uBirim'), () => state.birimler);
       document.getElementById('uStokTakibi').addEventListener('change', (e) => {
         document.getElementById('uStokAlanlari').classList.toggle('hidden', !e.target.checked);
       });
@@ -1464,11 +1515,10 @@
           <h3 style="font-size:15px; margin-bottom:14px;">Hızlı Ürün Ekle</h3>
           <div class="field"><label>Ürün adı</label><input id="aySpUrunAd" type="text"></div>
           <div class="grid grid-2">
-            <div class="field"><label>Birim</label><input id="aySpUrunBirim" type="text" list="birimListesiAyarlar" value="adet"></div>
+            <div class="field"><label>Birim</label><input id="aySpUrunBirim" type="text" value="adet"></div>
             <div class="field"><label>Satış fiyatı (KDV dahil)</label><input id="aySpUrunFiyat" type="number" step="0.01"></div>
           </div>
           <div class="field"><label>KDV oranı %</label><input id="aySpUrunKdv" type="number" value="20"></div>
-          <datalist id="birimListesiAyarlar">${state.birimler.map(b => `<option value="${esc(b)}">`).join('')}</datalist>
           <button id="aySpUrunEkleBtn" class="btn btn-primary btn-sm">Ürün Ekle</button>
         </div>
         <div class="card">
@@ -1482,6 +1532,8 @@
           <button id="aySpIsletmeEkleBtn" class="btn btn-primary btn-sm">İşletme Ekle</button>
         </div>
       </div>`;
+
+    attachCombobox(document.getElementById('aySpUrunBirim'), () => state.birimler);
 
     const firma = await fsGetFirma();
     document.getElementById('ayFirmaAd').value = firma.ad || '';
@@ -1592,8 +1644,7 @@
         <div class="grid grid-2">
           <div class="field">
             <label>İşletme adı</label>
-            <input type="text" id="teklifIsletme" list="isletmeListesiTeklif" placeholder="Mevcut işletme ya da yeni ad yaz" autocomplete="off">
-            <datalist id="isletmeListesiTeklif">${state.isletmeler.map(i => `<option value="${esc(i.ad)}">`).join('')}</datalist>
+            <input type="text" id="teklifIsletme" placeholder="Mevcut işletme ya da yeni ad yaz" autocomplete="off">
           </div>
           <div class="field" style="max-width:160px;">
             <label>KDV oranı %</label>
@@ -1609,8 +1660,6 @@
         <div class="line-item-header" style="grid-template-columns:2fr 1fr 1fr auto;">
           <span>Ürün Adı</span><span>Birim</span><span>Yaklaşık Maliyet</span><span></span>
         </div>
-        <datalist id="urunListesiTeklif">${state.urunler.map(u => `<option value="${esc(u.ad)}">`).join('')}</datalist>
-        <datalist id="birimListesiTeklif">${state.birimler.map(b => `<option value="${esc(b)}">`).join('')}</datalist>
         <div id="teklifKalemList"></div>
         <button id="teklifKalemEkleBtn" type="button" class="btn btn-ghost btn-sm">+ Ürün ekle</button>
 
@@ -1638,8 +1687,8 @@
       row.className = 'line-item-row';
       row.style.gridTemplateColumns = '2fr 1fr 1fr auto';
       row.innerHTML = `
-        <input class="t-ad" type="text" list="urunListesiTeklif" placeholder="Ürün adı" autocomplete="off" value="${mevcut ? esc(mevcut.ad) : ''}">
-        <input class="t-birim" type="text" list="birimListesiTeklif" placeholder="Birim" value="${mevcut ? esc(mevcut.birim) : 'adet'}" autocomplete="off">
+        <input class="t-ad" type="text" placeholder="Ürün adı" autocomplete="off" value="${mevcut ? esc(mevcut.ad) : ''}">
+        <input class="t-birim" type="text" placeholder="Birim" value="${mevcut ? esc(mevcut.birim) : 'adet'}" autocomplete="off">
         <input class="t-maliyet" type="number" step="0.01" placeholder="örn. 25" value="${mevcut ? mevcut.maliyet : ''}">
         <button type="button" class="icon-btn" title="Kaldır">✕</button>
       `;
@@ -1651,9 +1700,12 @@
           if (eslesen.birim) row.querySelector('.t-birim').value = eslesen.birim;
         }
       });
+      attachCombobox(row.querySelector('.t-ad'), () => state.urunler.map(u => u.ad));
+      attachCombobox(row.querySelector('.t-birim'), () => state.birimler);
       row.querySelector('.icon-btn').addEventListener('click', () => row.remove());
     }
     document.getElementById('teklifKalemEkleBtn').addEventListener('click', () => satirEkle());
+    attachCombobox(document.getElementById('teklifIsletme'), () => state.isletmeler.map(i => i.ad));
     satirEkle();
 
     function formuTemizle() {
