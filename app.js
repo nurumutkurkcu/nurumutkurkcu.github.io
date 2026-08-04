@@ -62,13 +62,16 @@
     if (c === 'auth/weak-password') return 'Şifre en az 6 karakter olmalı';
     return 'İşlem yapılamadı: ' + (err && err.message ? err.message : 'bilinmeyen hata');
   }
-  function confirmDialog(message) {
+  function confirmDialog(message, opts) {
+    const hayirText = (opts && opts.hayirText) || 'Vazgeç';
+    const evetText = (opts && opts.evetText) || 'Evet, sil';
+    const evetClass = (opts && opts.evetClass) || 'btn-danger';
     return new Promise((resolve) => {
       const host = document.createElement('div');
       host.className = 'confirm-backdrop';
       host.innerHTML = `<div class="confirm-box"><p>${esc(message)}</p><div class="row">
-        <button class="btn btn-ghost btn-block" id="confirmNo">Vazgeç</button>
-        <button class="btn btn-danger btn-block" id="confirmYes">Evet, sil</button>
+        <button class="btn btn-ghost btn-block" id="confirmNo">${esc(hayirText)}</button>
+        <button class="btn ${evetClass} btn-block" id="confirmYes">${esc(evetText)}</button>
       </div></div>`;
       document.body.appendChild(host);
       host.querySelector('#confirmNo').addEventListener('click', () => { host.remove(); resolve(false); });
@@ -234,14 +237,14 @@
   async function fsAddSiparis(payload) {
     const isletmeRef = col.isletmeler.doc(payload.isletmeId);
     const sayacRef = col.meta.doc('sayaclar');
+    const serbestRef = col.meta.doc('serbestSiparisNumaralari');
     const yeniSiparisRef = col.siparisler.doc();
 
     return db.runTransaction(async (tx) => {
       const isletmeSnap = await tx.get(isletmeRef);
       if (!isletmeSnap.exists) throw new Error('İşletme bulunamadı');
       const sayacSnap = await tx.get(sayacRef);
-      const mevcutNo = (sayacSnap.exists && sayacSnap.data().deger) || 0;
-      const yeniNo = mevcutNo + 1;
+      const serbestSnap = await tx.get(serbestRef);
 
       const kalemUrunler = [];
       for (const k of payload.kalemler) {
@@ -249,6 +252,19 @@
         const ref = col.urunler.doc(k.urunId);
         const snap = await tx.get(ref);
         kalemUrunler.push({ ref, snap, kalem: k });
+      }
+
+      // Önce silinmiş/serbest kalan sipariş numaralarından en küçüğünü kullan;
+      // yoksa sayaçtan yeni bir numara üret.
+      const serbestListe = (serbestSnap.exists && Array.isArray(serbestSnap.data().liste)) ? serbestSnap.data().liste : [];
+      let yeniNo;
+      if (serbestListe.length) {
+        yeniNo = Math.min(...serbestListe);
+        tx.set(serbestRef, { liste: serbestListe.filter(n => n !== yeniNo) }, { merge: true });
+      } else {
+        const mevcutNo = (sayacSnap.exists && sayacSnap.data().deger) || 0;
+        yeniNo = mevcutNo + 1;
+        tx.set(sayacRef, { deger: yeniNo }, { merge: true });
       }
 
       const siparis = {
@@ -267,7 +283,6 @@
         olusturmaTarihi: new Date().toISOString()
       };
       tx.set(yeniSiparisRef, siparis);
-      tx.set(sayacRef, { deger: yeniNo }, { merge: true });
 
       for (const u of kalemUrunler) {
         if (!u.snap.exists) continue;
@@ -350,6 +365,8 @@
       }
       const iptalRef = col.meta.doc('iptalEdilenSiparisler');
       const iptalSnap = await tx.get(iptalRef);
+      const serbestRef = col.meta.doc('serbestSiparisNumaralari');
+      const serbestSnap = await tx.get(serbestRef);
       tx.delete(col.siparisler.doc(siparis.id));
       for (const u of urunSnaps) {
         if (!u.snap.exists) continue;
@@ -359,10 +376,15 @@
           tx.update(u.ref, { stokAdedi: geriAlinan });
         }
       }
-      // Silinen sipariş numarasını kayıt altına al — bu numara bir daha asla
-      // yeni bir siparişe verilmez (sayaç zaten hep ileri gider, geri sayılmaz).
+      // Silinen sipariş numarası: geçmiş kayıt için not düşülür, ayrıca
+      // "serbest numaralar" havuzuna eklenir — bir sonraki yeni siparişte
+      // bu numara (varsa) öncelikle tekrar kullanılır (boşta numara kalmaz).
       const mevcutKayit = iptalSnap.exists && Array.isArray(iptalSnap.data().liste) ? iptalSnap.data().liste : [];
       tx.set(iptalRef, { liste: [...mevcutKayit, { siraNo: siparis.siraNo, isletmeAdi: siparis.isletmeAdi, tutar: siparis.toplamTutar, silinmeTarihi: new Date().toISOString() }].slice(-200) });
+      const serbestListe = (serbestSnap.exists && Array.isArray(serbestSnap.data().liste)) ? serbestSnap.data().liste : [];
+      if (!serbestListe.includes(siparis.siraNo)) {
+        tx.set(serbestRef, { liste: [...serbestListe, siparis.siraNo] }, { merge: true });
+      }
     });
   }
 
@@ -450,6 +472,10 @@
       .replace(/Ş/g, 'S').replace(/ş/g, 's').replace(/Ç/g, 'C').replace(/ç/g, 'c')
       .replace(/Ö/g, 'O').replace(/ö/g, 'o').replace(/Ü/g, 'U').replace(/ü/g, 'u');
   }
+  function pdfSayi(n) {
+    // Türkçe biçim: binlik ayracı nokta, kuruş virgül — örn. 1.234,56
+    return (Number(n) || 0).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
   async function irsaliyePdfOlusturVeAc(siparis) {
     const firma = await fsGetFirma();
     const { PDFDocument, rgb, StandardFonts } = PDFLib;
@@ -493,24 +519,51 @@
       page.drawText(pdfTr(k.urunAdi).slice(0, 32), { x: cols[0].x + 4, y, size: 9, font, color: rgb(0, 0, 0) });
       page.drawText(String(k.adet), { x: cols[1].x + 4, y, size: 9, font });
       page.drawText(pdfTr(k.birim || 'adet'), { x: cols[2].x + 4, y, size: 9, font });
-      page.drawText(k.birimFiyat.toFixed(2), { x: cols[3].x + 4, y, size: 9, font });
+      page.drawText(pdfSayi(k.birimFiyat), { x: cols[3].x + 4, y, size: 9, font });
       page.drawText(String(k.kdvOrani), { x: cols[4].x + 4, y, size: 9, font });
-      page.drawText(k.tutar.toFixed(2), { x: cols[5].x + 4, y, size: 9, font });
+      page.drawText(pdfSayi(k.tutar), { x: cols[5].x + 4, y, size: 9, font });
       y -= 18;
     }
     y -= 10;
     page.drawLine({ start: { x: marginX, y }, end: { x: width - marginX, y }, thickness: 1, color: rgb(0.85, 0.85, 0.85) });
     y -= 24;
     page.drawText(pdfTr('Genel Toplam (KDV Dahil):'), { x: marginX + 260, y, size: 11, font: fontBold, color: koyu });
-    page.drawText(`${siparis.toplamTutar.toFixed(2)} TL`, { x: marginX + 430, y, size: 11, font: fontBold, color: rgb(0, 0, 0) });
+    page.drawText(`${pdfSayi(siparis.toplamTutar)} TL`, { x: marginX + 430, y, size: 11, font: fontBold, color: rgb(0, 0, 0) });
     y -= 18;
     page.drawText(pdfTr('Odeme Turu: ') + pdfTr(siparis.odemeTuru), { x: marginX + 260, y, size: 9, font, color: gri });
     y -= 14;
     const kalan = siparis.toplamTutar - (siparis.odenenTutar || 0);
-    page.drawText(pdfTr('Odenen: ') + `${(siparis.odenenTutar || 0).toFixed(2)} TL   ` + pdfTr('Kalan: ') + `${kalan.toFixed(2)} TL`, { x: marginX + 260, y, size: 9, font, color: gri });
+    page.drawText(pdfTr('Odenen: ') + `${pdfSayi(siparis.odenenTutar || 0)} TL   ` + pdfTr('Kalan: ') + `${pdfSayi(kalan)} TL`, { x: marginX + 260, y, size: 9, font, color: gri });
     y -= 14;
     page.drawText(pdfTr('Teslimat: ') + (siparis.teslimEdildi ? pdfTr('Teslim edildi') : pdfTr('Bekliyor')), { x: marginX + 260, y, size: 9, font, color: gri });
     if (siparis.notlar) { y -= 26; page.drawText(pdfTr('Not: ') + pdfTr(siparis.notlar), { x: marginX, y, size: 9, font, color: gri }); }
+
+    // ---- İşletmenin genel cari durumu (bu irsaliyenin altında) ----
+    let genelBakiye = 0, digerOdenenToplam = 0, tumSiparisSayisi = 0;
+    try {
+      const digerSnap = await col.siparisler.where('isletmeId', '==', siparis.isletmeId).get();
+      const tumSip = digerSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      tumSiparisSayisi = tumSip.length;
+      genelBakiye = isletmeBakiyeHesapla(tumSip, siparis.isletmeId);
+      digerOdenenToplam = round2(tumSip.filter(s => s.id !== siparis.id).reduce((t, s) => t + (s.odenenTutar || 0), 0));
+    } catch (e) { /* genel bakiye alınamazsa irsaliye yine de üretilsin */ }
+
+    y -= 34;
+    if (y < 90) { y = 90; }
+    page.drawLine({ start: { x: marginX, y }, end: { x: width - marginX, y }, thickness: 1, color: rgb(0.85, 0.85, 0.85) });
+    y -= 18;
+    page.drawText(pdfTr(`${siparis.isletmeAdi} - Genel Cari Durum`), { x: marginX, y, size: 10, font: fontBold, color: koyu });
+    y -= 16;
+    page.drawText(pdfTr(`Bu siparisten kalan: ${pdfSayi(kalan)} TL`), { x: marginX, y, size: 9, font, color: gri });
+    y -= 14;
+    page.drawText(pdfTr(`Diger siparislerden simdiye kadar odenen: ${pdfSayi(digerOdenenToplam)} TL (toplam ${tumSiparisSayisi} siparis)`), { x: marginX, y, size: 9, font, color: gri });
+    y -= 14;
+    const genelDurumMetni = genelBakiye > 0
+      ? `Toplam Bakiye: Alacakliyiz ${pdfSayi(genelBakiye)} TL`
+      : genelBakiye < 0
+        ? `Toplam Bakiye: Borcluyuz ${pdfSayi(Math.abs(genelBakiye))} TL`
+        : `Toplam Bakiye: Kapali (0,00 TL)`;
+    page.drawText(pdfTr(genelDurumMetni), { x: marginX, y, size: 10, font: fontBold, color: genelBakiye > 0 ? koyu : (genelBakiye < 0 ? rgb(0.55, 0.15, 0.1) : gri) });
 
     const bytes = await doc.save();
     const blob = new Blob([bytes], { type: 'application/pdf' });
@@ -562,15 +615,15 @@
         page.drawText(pdfTr(k.ad).slice(0, 36), { x: cols[0].x + 4, y, size: 9, font, color: rgb(0, 0, 0) });
         page.drawText(String(k.adet), { x: cols[1].x + 4, y, size: 9, font });
         page.drawText(pdfTr(k.birim || 'adet'), { x: cols[2].x + 4, y, size: 9, font });
-        page.drawText(k.birimFiyat.toFixed(2), { x: cols[3].x + 4, y, size: 9, font });
-        page.drawText(k.tutar.toFixed(2), { x: cols[4].x + 4, y, size: 9, font });
+        page.drawText(pdfSayi(k.birimFiyat), { x: cols[3].x + 4, y, size: 9, font });
+        page.drawText(pdfSayi(k.tutar), { x: cols[4].x + 4, y, size: 9, font });
         y -= 18;
       }
       y -= 10;
       page.drawLine({ start: { x: marginX, y }, end: { x: width - marginX, y }, thickness: 1, color: rgb(0.85, 0.85, 0.85) });
       y -= 24;
       page.drawText(pdfTr('Teklif Toplami (KDV Dahil):'), { x: marginX + 260, y, size: 11, font: fontBold, color: koyu });
-      page.drawText(`${teklif.toplam.toFixed(2)} TL`, { x: marginX + 430, y, size: 11, font: fontBold, color: rgb(0, 0, 0) });
+      page.drawText(`${pdfSayi(teklif.toplam)} TL`, { x: marginX + 430, y, size: 11, font: fontBold, color: rgb(0, 0, 0) });
       y -= 30;
       page.drawText(pdfTr('Bu bir tekliftir, kesin siparis degildir. Fiyatlar tahminidir.'), { x: marginX, y, size: 8, font, color: gri });
     });
@@ -948,7 +1001,10 @@
       const eksikFiyat = satirlar.some(s => !s.fiyat || s.fiyat <= 0);
       if (eksikFiyat) return toast('Her kalem için birim fiyat girilmeli (bilmiyorsan "Yklş" işaretleyip Yaklaşık Dağıt kullan)', true);
 
-      const onay = await confirmDialog(editing ? `#${editing.siraNo} numaralı siparişteki değişiklikleri kaydetmek istediğine emin misin?` : 'Bu siparişi kaydetmek istediğine emin misin?');
+      const onay = await confirmDialog(
+        editing ? `#${editing.siraNo} numaralı siparişteki değişiklikleri kaydetmek istediğine emin misin?` : 'Bu siparişi oluşturmak istediğine emin misin?',
+        { hayirText: 'Hayır', evetText: editing ? 'Kaydet' : 'Oluştur', evetClass: 'btn-primary' }
+      );
       if (!onay) return;
 
       btn.disabled = true;
@@ -1058,7 +1114,16 @@
   async function renderSiparisler() {
     main.innerHTML = `
       <div class="page-header"><div><h1>Siparişler</h1><div class="sub">Satıra tıkla, detaylar aşağı açılsın — yazdır, indir veya sil</div></div>
-        <button id="csvIndirBtn" class="btn btn-ghost btn-sm">CSV İndir</button></div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <select id="csvTipSecimi">
+            <option value="liste">Görünen liste</option>
+            <option value="aylik">Aylık özet</option>
+            <option value="yillik">Yıllık özet</option>
+            <option value="musteri">Müşteri bazlı özet</option>
+          </select>
+          <button id="csvIndirBtn" class="btn btn-ghost btn-sm">CSV İndir</button>
+        </div>
+      </div>
       <div class="toolbar">
         <input type="text" id="sipArama" placeholder="İşletme adı veya sipariş no ile ara">
         <select id="sipIsletmeFiltre">
@@ -1158,7 +1223,7 @@
         if (!tutar || tutar <= 0) return toast('Geçerli bir ödeme tutarı gir', true);
         const kalanTutar = Number(btn.dataset.kalan);
         if (tutar > kalanTutar + 0.01) {
-          const devam = await confirmDialog(`Girdiğin tutar (${money(tutar)}), kalan borçtan (${money(kalanTutar)}) fazla. Yine de eklensin mi?`);
+          const devam = await confirmDialog(`Girdiğin tutar (${money(tutar)}), kalan borçtan (${money(kalanTutar)}) fazla. Yine de eklensin mi?`, { hayirText: 'Hayır', evetText: 'Evet, Ekle', evetClass: 'btn-primary' });
           if (!devam) return;
         }
         try {
@@ -1228,13 +1293,60 @@
     document.getElementById('sipAyFiltre').addEventListener('change', filtrele);
 
     document.getElementById('csvIndirBtn').addEventListener('click', () => {
-      const rows = [['Sipariş No','Tarih','İşletme','Tür','Toplam','Ödenen','Kalan','Ödeme Türü','Teslimat','Oluşturan']];
-      aktifListe.forEach(s => rows.push([
-        s.siraNo, formatTarih(s.tarih), s.isletmeAdi, s.tur === 'satis' ? 'Satış' : 'Alış',
-        s.toplamTutar, s.odenenTutar || 0, round2(s.toplamTutar - (s.odenenTutar||0)),
-        s.odemeTuru, s.teslimEdildi ? 'Teslim edildi' : 'Bekliyor', s.olusturanKullanici || ''
-      ]));
-      downloadCsv('siparisler.csv', rows);
+      const tip = document.getElementById('csvTipSecimi').value;
+
+      if (tip === 'liste') {
+        const rows = [['Sipariş No','Tarih','İşletme','Tür','Toplam','Ödenen','Kalan','Ödeme Türü','Teslimat','Oluşturan']];
+        aktifListe.forEach(s => rows.push([
+          s.siraNo, formatTarih(s.tarih), s.isletmeAdi, s.tur === 'satis' ? 'Satış' : 'Alış',
+          s.toplamTutar, s.odenenTutar || 0, round2(s.toplamTutar - (s.odenenTutar||0)),
+          s.odemeTuru, s.teslimEdildi ? 'Teslim edildi' : 'Bekliyor', s.olusturanKullanici || ''
+        ]));
+        downloadCsv('siparisler.csv', rows);
+        return;
+      }
+
+      if (tip === 'aylik' || tip === 'yillik') {
+        const uzunluk = tip === 'aylik' ? 7 : 4; // "YYYY-MM" ya da "YYYY"
+        const gruplar = {};
+        aktifListe.forEach(s => {
+          const anahtar = String(s.tarih || '').slice(0, uzunluk);
+          if (!gruplar[anahtar]) gruplar[anahtar] = { adet: 0, toplam: 0, odenen: 0 };
+          gruplar[anahtar].adet++;
+          gruplar[anahtar].toplam = round2(gruplar[anahtar].toplam + s.toplamTutar);
+          gruplar[anahtar].odenen = round2(gruplar[anahtar].odenen + (s.odenenTutar || 0));
+        });
+        const anahtarlar = Object.keys(gruplar).sort();
+        const baslik = tip === 'aylik' ? 'Ay' : 'Yıl';
+        const rows = [[baslik, 'Sipariş Sayısı', 'Toplam Tutar', 'Ödenen', 'Kalan']];
+        anahtarlar.forEach(k => {
+          const g = gruplar[k];
+          rows.push([k, g.adet, g.toplam, g.odenen, round2(g.toplam - g.odenen)]);
+        });
+        downloadCsv(tip === 'aylik' ? 'siparisler-aylik.csv' : 'siparisler-yillik.csv', rows);
+        return;
+      }
+
+      if (tip === 'musteri') {
+        const gruplar = {};
+        aktifListe.forEach(s => {
+          if (!gruplar[s.isletmeAdi]) gruplar[s.isletmeAdi] = { adet: 0, toplam: 0, odenen: 0, alacak: 0, borc: 0 };
+          const g = gruplar[s.isletmeAdi];
+          g.adet++;
+          g.toplam = round2(g.toplam + s.toplamTutar);
+          g.odenen = round2(g.odenen + (s.odenenTutar || 0));
+          const kalanTutar = round2(s.toplamTutar - (s.odenenTutar || 0));
+          if (s.tur === 'satis') g.alacak = round2(g.alacak + kalanTutar);
+          else g.borc = round2(g.borc + kalanTutar);
+        });
+        const rows = [['İşletme', 'Sipariş Sayısı', 'Toplam Tutar', 'Ödenen', 'Alacağım', 'Borcum', 'Net Bakiye']];
+        Object.keys(gruplar).sort().forEach(ad => {
+          const g = gruplar[ad];
+          rows.push([ad, g.adet, g.toplam, g.odenen, g.alacak, g.borc, round2(g.alacak - g.borc)]);
+        });
+        downloadCsv('siparisler-musteri-bazli.csv', rows);
+        return;
+      }
     });
   }
 
@@ -1838,7 +1950,7 @@
       }));
       host.querySelectorAll('button[data-fatura-kes]').forEach(btn => btn.addEventListener('click', async () => {
         const t = teklifler.find(x => x.id === btn.dataset.faturaKes);
-        const ok = await confirmDialog(`"${t.isletmeAdi}" için Teklif 1 tutarı (${money(t.teklifler[0].toplam)}) üzerinden fatura kesildi olarak işaretlensin mi? Bu, Fatura Kesilenler sayfasında (aylık KDV raporunda) görünecek.`);
+        const ok = await confirmDialog(`"${t.isletmeAdi}" için Teklif 1 tutarı (${money(t.teklifler[0].toplam)}) üzerinden fatura kesildi olarak işaretlensin mi? Bu, Fatura Kesilenler sayfasında (aylık KDV raporunda) görünecek.`, { hayirText: 'Hayır', evetText: 'Evet, İşaretle', evetClass: 'btn-primary' });
         if (!ok) return;
         try {
           await fsUpdateTeklif(t.id, { durum: 'faturaKesildi', faturaTarihi: todayISO(), faturaTutari: t.teklifler[0].toplam });

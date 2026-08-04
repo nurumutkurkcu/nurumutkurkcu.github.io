@@ -131,3 +131,21 @@ diğerlerine (manifest.json, icon'lar, firestore.rules) dokunmana gerek yok.
   tuşlarıyla gezilebilen kendi açılır pencere bileşenimizi kullanıyor.
   Listede yoksa elle yazabilirsin, kaydettiğinde otomatik olarak listeye
   eklenir ve bir sonraki seferde seçenek olarak çıkar.
+
+## Bu sürümde eklenenler (7. güncelleme)
+- **Sipariş numaraları artık yeniden kullanılıyor:** Hatalı girilip silinen
+  bir sipariş numarası boşta kalmıyor — bir sonraki yeni siparişte önce
+  o boş numara kullanılıyor, numaralar arasında boşluk oluşmuyor.
+- **CSV dışa aktarmada 4 seçenek:** Görünen liste, Aylık özet, Yıllık özet,
+  Müşteri bazlı özet — Siparişler sayfasında CSV İndir'in yanındaki
+  açılır menüden seçiliyor.
+- **İrsaliye PDF'inin altına işletmenin genel cari durumu eklendi:** Bu
+  siparişten kalan tutar, diğer siparişlerden şimdiye kadar ödenen toplam
+  ve işletmenin toplam bakiyesi ("Alacaklıyız X TL" / "Borçluyuz X TL" /
+  "Kapalı") her irsaliyenin altında görünüyor.
+- **Onay pencereleri netleşti:** Sipariş oluştururken/kaydederken artık
+  "Hayır / Oluştur" (düzenlemede "Hayır / Kaydet") yazıyor. Silme işlemleri
+  hâlâ "Vazgeç / Evet, sil" — değiştirilmedi.
+- **Sayı formatı düzeltildi:** İrsaliye ve teklif PDF'lerindeki tüm tutarlar
+  artık Türkçe biçimde (binlik ayracı nokta, kuruş virgülle — örn.
+  1.234,56 TL). Ekrandaki gösterim zaten doğruydu.
