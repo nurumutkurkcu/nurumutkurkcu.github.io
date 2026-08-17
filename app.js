@@ -179,10 +179,15 @@
     const snap = await col.siparisler.get();
     return snap.docs.map(d => ({ id: d.id, ...d.data() }));
   }
+  function siparisCariAktifMi(siparis) {
+    // Satış siparişleri, teslimat onaylanana kadar cariye yansımaz.
+    // Alış kayıtlarının mevcut cari davranışı korunur.
+    return siparis.tur !== 'satis' || siparis.teslimEdildi === true;
+  }
   function isletmeBakiyeHesapla(siparisler, isletmeId) {
     let bakiye = 0;
     for (const s of siparisler) {
-      if (s.isletmeId !== isletmeId) continue;
+      if (s.isletmeId !== isletmeId || !siparisCariAktifMi(s)) continue;
       const kalan = round2(s.toplamTutar - (s.odenenTutar || 0));
       if (s.tur === 'satis') bakiye += kalan; else bakiye -= kalan;
     }
@@ -802,7 +807,8 @@
           </div>
           <div class="field">
             <label style="display:block;">Teslimat</label>
-            <label style="font-weight:400; font-size:13.5px;"><input type="checkbox" id="sipTeslimEdildi" ${(!editing || editing.teslimEdildi) ? 'checked' : ''} style="width:auto; margin-right:6px;">Teslim edildi (işaretsiz bırakırsan "bekliyor" olarak kaydedilir)</label>
+            <label style="font-weight:400; font-size:13.5px;"><input type="checkbox" id="sipTeslimEdildi" ${(editing && editing.teslimEdildi) ? 'checked' : ''} style="width:auto; margin-right:6px;">Teslim edildi (işaretsiz bırakırsan "bekliyor" olarak kaydedilir)</label>
+            <div class="sub" style="font-size:11.5px; margin-top:5px;">Satış siparişi teslim edildi olarak onaylanana kadar cari bakiyeye yansımaz.</div>
           </div>
         </div>
 
@@ -1164,14 +1170,16 @@
       if (!liste.length) { host.innerHTML = `<div class="empty-state">Kayıtlı sipariş yok.</div>`; return; }
       const kalan = (s) => round2(s.toplamTutar - (s.odenenTutar || 0));
       host.innerHTML = liste.map(s => `
-        <div class="order-card-wrap">
+        <div class="order-card-wrap ${s.teslimEdildi ? 'order-delivered' : 'order-waiting'}">
           <div class="order-card clickable" data-toggle="${s.id}">
             <div class="oc-main">
               <div class="oc-isletme">${esc(s.isletmeAdi)} <span class="badge badge-${s.tur}">${s.tur === 'satis' ? 'Satış' : 'Alış'}</span>
-                <button type="button" class="badge status-pill ${s.teslimEdildi ? 'status-green' : 'status-red'}" data-teslimat-toggle="${s.id}" data-mevcut="${s.teslimEdildi ? '1':'0'}" title="Değiştirmek için tıkla">
-                  ${s.teslimEdildi ? '✓ Teslim Edildi' : '⏳ Bekliyor'}
-                </button>
+                <span class="order-status-buttons" role="group" aria-label="Teslimat durumu">
+                  <button type="button" class="order-status-btn waiting ${!s.teslimEdildi ? 'active' : ''}" data-durum-set="${s.id}" data-durum="bekliyor">⏳ Bekliyor</button>
+                  <button type="button" class="order-status-btn delivered ${s.teslimEdildi ? 'active' : ''}" data-durum-set="${s.id}" data-durum="teslim">✓ Teslim Edildi</button>
+                </span>
                 <span class="badge status-pill ${kalan(s) > 0 ? 'status-red' : 'status-green'}">${kalan(s) > 0 ? '✕ Ödenmedi' : '✓ Ödendi'}</span>
+                ${s.tur === 'satis' && !s.teslimEdildi ? '<span class="badge cari-pending-badge">Cari dışı</span>' : ''}
               </div>
               <div class="oc-meta">#${s.siraNo} · ${formatTarih(s.tarih)} · ${esc(s.olusturanKullanici || 'bilinmiyor')} tarafından oluşturuldu · ${s.kalemler.length} kalem ürün</div>
             </div>
@@ -1240,11 +1248,16 @@
         try { await fsDeleteSiparis(s); toast('Sipariş silindi'); renderSiparisler(); }
         catch (err) { toast(err.message, true); }
       }));
-      host.querySelectorAll('button[data-teslimat-toggle]').forEach(btn => btn.addEventListener('click', async (e) => {
+      host.querySelectorAll('button[data-durum-set]').forEach(btn => btn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        const yeni = btn.dataset.mevcut !== '1';
-        try { await fsUpdateSiparis(btn.dataset.teslimatToggle, { teslimEdildi: yeni }); toast('Teslimat durumu güncellendi'); renderSiparisler(); }
-        catch (err) { toast(err.message, true); }
+        const yeni = btn.dataset.durum === 'teslim';
+        const siparis = liste.find(x => x.id === btn.dataset.durumSet);
+        if (!siparis || siparis.teslimEdildi === yeni) return;
+        try {
+          await fsUpdateSiparis(btn.dataset.durumSet, { teslimEdildi: yeni });
+          toast(yeni ? 'Sipariş teslim edildi olarak işaretlendi' : 'Sipariş bekliyor durumuna alındı');
+          renderSiparisler();
+        } catch (err) { toast(err.message, true); }
       }));
     }
     ciz(tumu);
@@ -1255,6 +1268,7 @@
       const isletmeSip = tumu.filter(s => s.isletmeAdi === isletmeAdi);
       let alacak = 0, borc = 0;
       isletmeSip.forEach(s => {
+        if (!siparisCariAktifMi(s)) return;
         const kalan = round2(s.toplamTutar - (s.odenenTutar || 0));
         if (s.tur === 'satis') alacak += kalan; else borc += kalan;
       });
@@ -1336,8 +1350,10 @@
           g.toplam = round2(g.toplam + s.toplamTutar);
           g.odenen = round2(g.odenen + (s.odenenTutar || 0));
           const kalanTutar = round2(s.toplamTutar - (s.odenenTutar || 0));
-          if (s.tur === 'satis') g.alacak = round2(g.alacak + kalanTutar);
-          else g.borc = round2(g.borc + kalanTutar);
+          if (siparisCariAktifMi(s)) {
+            if (s.tur === 'satis') g.alacak = round2(g.alacak + kalanTutar);
+            else g.borc = round2(g.borc + kalanTutar);
+          }
         });
         const rows = [['İşletme', 'Sipariş Sayısı', 'Toplam Tutar', 'Ödenen', 'Alacağım', 'Borcum', 'Net Bakiye']];
         Object.keys(gruplar).sort().forEach(ad => {
@@ -1355,6 +1371,10 @@
     main.innerHTML = `
       <div class="page-header"><div><h1>İşletmeler</h1><div class="sub">Ürün verdiğin / aldığın işletmeler ve cari bakiyeleri</div></div>
         <button id="yeniIsletmeBtn" class="btn btn-amber">+ Yeni İşletme</button></div>
+      <div class="toolbar isletme-search-toolbar">
+        <input type="search" id="isletmeArama" placeholder="İşletme, telefon, adres veya vergi no ile ara" autocomplete="off">
+        <span id="isletmeAramaSonuc" class="sub"></span>
+      </div>
       <div class="card"><table><thead><tr><th>İşletme</th><th>Telefon</th><th class="text-right">Bakiye</th><th></th></tr></thead>
       <tbody id="islTbody"></tbody></table></div>
       <div id="islDetay" class="card mt-4 hidden"></div>`;
@@ -1362,16 +1382,40 @@
     const isletmeler = await fsGetIsletmeler();
     state.isletmeler = isletmeler;
     const tbody = document.getElementById('islTbody');
-    if (isletmeler.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state">Henüz işletme kaydı yok.</div></td></tr>`;
-    } else {
-      tbody.innerHTML = isletmeler.map(i => `
+    const arama = document.getElementById('isletmeArama');
+    const sonuc = document.getElementById('isletmeAramaSonuc');
+
+    function normalizeSearch(v) {
+      return String(v || '')
+        .toLocaleLowerCase('tr-TR')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/ı/g, 'i').replace(/ş/g, 's').replace(/ğ/g, 'g').replace(/ü/g, 'u').replace(/ö/g, 'o').replace(/ç/g, 'c')
+        .trim();
+    }
+
+    function isletmeListeCiz(liste) {
+      sonuc.textContent = isletmeler.length ? `${liste.length} / ${isletmeler.length} işletme` : '';
+      const detay = document.getElementById('islDetay');
+      if (detay) detay.classList.add('hidden');
+
+      if (isletmeler.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state">Henüz işletme kaydı yok.</div></td></tr>`;
+        return;
+      }
+      if (liste.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state">Aramana uyan işletme bulunamadı.</div></td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = liste.map(i => `
         <tr class="clickable" data-id="${i.id}">
           <td>${esc(i.ad)}</td>
           <td>${esc(i.telefon || '—')}</td>
           <td class="text-right mono" style="color:${i.bakiye > 0 ? 'var(--teal-700)' : i.bakiye < 0 ? 'var(--danger)' : 'inherit'}">${i.bakiye > 0 ? 'Alacaklıyım ' : i.bakiye < 0 ? 'Borçluyum ' : ''}${money(Math.abs(i.bakiye))}</td>
           <td class="text-right"><button class="btn btn-ghost btn-sm" data-duzenle="${i.id}">Düzenle</button> <button class="btn btn-danger btn-sm" data-sil="${i.id}">Sil</button></td>
         </tr>`).join('');
+
       tbody.querySelectorAll('tr[data-id]').forEach(tr => tr.addEventListener('click', (e) => {
         if (e.target.closest('button')) return;
         isletmeDetay(tr.dataset.id);
@@ -1379,6 +1423,7 @@
       tbody.querySelectorAll('button[data-sil]').forEach(btn => btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const isl = isletmeler.find(x => x.id === btn.dataset.sil);
+        if (!isl) return;
         const ok = await confirmDialog(`"${isl.ad}" işletmesini silmek istediğine emin misin? Geçmiş siparişleri etkilemez ama listeden kaybolur.`);
         if (!ok) return;
         try { await fsDeleteIsletme(btn.dataset.sil); toast('İşletme silindi'); renderIsletmeler(); }
@@ -1387,9 +1432,21 @@
       tbody.querySelectorAll('button[data-duzenle]').forEach(btn => btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const isl = isletmeler.find(x => x.id === btn.dataset.duzenle);
-        isletmeDuzenleForm(isl);
+        if (isl) isletmeDuzenleForm(isl);
       }));
     }
+
+    function filtreleIsletmeler() {
+      const q = normalizeSearch(arama.value);
+      if (!q) return isletmeListeCiz(isletmeler);
+      const liste = isletmeler.filter(i => normalizeSearch([
+        i.ad, i.telefon, i.adres, i.vergiNo, i.notlar
+      ].filter(Boolean).join(' ')).includes(q));
+      isletmeListeCiz(liste);
+    }
+
+    isletmeListeCiz(isletmeler);
+    arama.addEventListener('input', filtreleIsletmeler);
 
     document.getElementById('yeniIsletmeBtn').addEventListener('click', async () => {
       const ad = prompt('İşletme adı:');
@@ -1447,7 +1504,7 @@
           <td>${formatTarih(s.tarih)}</td><td>#${s.siraNo}</td>
           <td><span class="badge badge-${s.tur}">${s.tur === 'satis' ? 'Satış' : 'Alış'}</span></td>
           <td>${s.teslimEdildi ? '<span class="badge badge-ok">Teslim edildi</span>' : '<span class="badge badge-kritik">Bekliyor</span>'}</td>
-          <td style="font-size:12px;">${esc(s.odemeTuru)}${kalan(s) > 0 ? ' · <span style="color:var(--danger)">ödenmedi</span>' : ' · <span style="color:var(--teal-700)">ödendi</span>'}</td>
+          <td style="font-size:12px;">${esc(s.odemeTuru)}${kalan(s) > 0 ? ' · <span style="color:var(--danger)">ödenmedi</span>' : ' · <span style="color:var(--teal-700)">ödendi</span>'}${s.tur === 'satis' && !s.teslimEdildi ? ' · <span style="color:#8B6500; font-weight:700;">cariye yansımıyor</span>' : ''}</td>
           <td class="text-right mono">${money(s.toplamTutar)}</td>
           <td class="text-right mono">${money(kalan(s))}</td>
           <td class="text-right"><button class="btn btn-ghost btn-sm" data-irsaliye="${s.id}">İrsaliye</button></td>

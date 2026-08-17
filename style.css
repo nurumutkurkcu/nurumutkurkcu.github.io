@@ -136,6 +136,23 @@ button{font-family:inherit;}
 .order-card .oc-meta{font-size:12px; color:var(--ink-soft); margin-top:4px;}
 .order-card .oc-tutar{font-size:16px; text-align:right; min-width:110px;}
 .order-card .oc-actions{display:flex; gap:8px;}
+.order-card-wrap.order-delivered .order-card{background:#DDF3E4; border-color:#A7D5B5;}
+.order-card-wrap.order-waiting .order-card{background:#D3A62E; border-color:#A97B00;}
+.order-card-wrap.order-waiting .oc-meta{color:#4B3A0A;}
+.order-card-wrap.order-delivered .order-detail{border-color:#A7D5B5; background:#F1FAF4;}
+.order-card-wrap.order-waiting .order-detail{border-color:#A97B00; background:#F7E8B8;}
+.order-status-buttons{display:inline-flex; gap:4px; margin-left:4px; vertical-align:middle;}
+.order-status-btn{
+  border:1px solid rgba(8,34,32,.22); background:rgba(255,255,255,.75); color:var(--teal-950);
+  border-radius:999px; padding:4px 9px; font:600 11px/1.2 inherit; cursor:pointer;
+  transition:transform .12s ease, box-shadow .12s ease, background .12s ease;
+}
+.order-status-btn:hover{transform:translateY(-1px); box-shadow:0 2px 7px rgba(0,0,0,.12);}
+.order-status-btn.waiting.active{background:#8B6500; color:#fff; border-color:#8B6500;}
+.order-status-btn.delivered.active{background:#18734F; color:#fff; border-color:#18734F;}
+.cari-pending-badge{background:#5D470C; color:#FFF4C9;}
+.isletme-search-toolbar #isletmeArama{flex:1; min-width:260px; max-width:620px;}
+.isletme-search-toolbar #isletmeAramaSonuc{font-size:12px; color:var(--ink-soft); white-space:nowrap;}
 
 /* ---------- Silme onayı ---------- */
 .confirm-backdrop{

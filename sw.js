@@ -3,7 +3,7 @@
 // istekleri farklı bir alan adına gittiği için bu service worker'a hiç
 // uğramaz — veri her zaman canlı ve senkron kalır.
 
-const CACHE_NAME = 'nur-umut-shell-v8';
+const CACHE_NAME = 'nur-umut-shell-v9';
 const APP_SHELL = [
   './',
   './index.html',
