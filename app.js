@@ -79,6 +79,49 @@
       host.addEventListener('click', (e) => { if (e.target === host) { host.remove(); resolve(false); } });
     });
   }
+  function odemeTutariDialog(siparis) {
+    const toplam = round2(Number(siparis.toplamTutar) || 0);
+    const mevcut = round2(Number(siparis.odenenTutar) || 0);
+    return new Promise((resolve) => {
+      const host = document.createElement('div');
+      host.className = 'confirm-backdrop';
+      host.innerHTML = `<div class="confirm-box payment-dialog-box">
+        <p style="margin-bottom:8px; font-weight:700;">Ödeme durumunu güncelle</p>
+        <div class="sub" style="font-size:12.5px; margin-bottom:14px;">${esc(siparis.isletmeAdi || '')} · Sipariş #${esc(siparis.siraNo || '')}<br>Toplam sipariş: <strong>${money(toplam)}</strong></div>
+        <label for="paymentStatusAmount" style="display:block; text-align:left; font-size:12px; font-weight:700; margin-bottom:6px;">Şimdiye kadar toplam ödenen tutar</label>
+        <input id="paymentStatusAmount" type="number" min="0" max="${toplam}" step="0.01" value="${mevcut}" style="width:100%; margin-bottom:8px;">
+        <div class="payment-dialog-help">0 TL = Ödenmedi · Ara tutar = Kısmi Ödendi · ${money(toplam)} = Ödendi</div>
+        <div class="row" style="margin-top:16px;">
+          <button class="btn btn-ghost btn-block" id="paymentCancel">Vazgeç</button>
+          <button class="btn btn-primary btn-block" id="paymentSave">Kaydet</button>
+        </div>
+      </div>`;
+      document.body.appendChild(host);
+      const input = host.querySelector('#paymentStatusAmount');
+      setTimeout(() => { input.focus(); input.select(); }, 0);
+      let kapandi = false;
+      const bitir = (deger) => {
+        if (kapandi) return;
+        kapandi = true;
+        host.remove();
+        resolve(deger);
+      };
+      const kaydet = () => {
+        const deger = Number(input.value);
+        if (!Number.isFinite(deger) || deger < 0) { toast('Geçerli bir ödeme tutarı gir', true); input.focus(); return; }
+        if (deger > toplam + 0.005) { toast('Ödenen tutar sipariş toplamını aşamaz', true); input.focus(); return; }
+        bitir(round2(Math.min(deger, toplam)));
+      };
+      host.querySelector('#paymentCancel').addEventListener('click', () => bitir(null));
+      host.querySelector('#paymentSave').addEventListener('click', kaydet);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); kaydet(); }
+        if (e.key === 'Escape') { e.preventDefault(); bitir(null); }
+      });
+      host.addEventListener('click', (e) => { if (e.target === host) bitir(null); });
+    });
+  }
+
   function downloadCsv(filename, rows) {
     const csv = rows.map(r => r.map(c => {
       const v = String(c == null ? '' : c).replace(/"/g, '""');
@@ -1164,13 +1207,101 @@
       </tr>`).join('');
     }
 
+    function odemeDurumBilgisi(s) {
+      const toplam = round2(Number(s.toplamTutar) || 0);
+      const odenen = round2(Number(s.odenenTutar) || 0);
+      if (odenen <= 0.005) return { sinif: 'status-red', metin: '✕ Ödenmedi' };
+      if (odenen >= toplam - 0.005) return { sinif: 'status-green', metin: '✓ Ödendi' };
+      return { sinif: 'status-yellow', metin: '◐ Kısmi Ödendi' };
+    }
+
+    function kartOdemeDurumunuGuncelle(s) {
+      const wrap = document.querySelector(`.order-card-wrap[data-order-id="${s.id}"]`);
+      if (!wrap) return;
+      const kalanTutar = round2((Number(s.toplamTutar) || 0) - (Number(s.odenenTutar) || 0));
+      const durum = odemeDurumBilgisi(s);
+      const badge = wrap.querySelector('button[data-odeme-durum]');
+      if (badge) {
+        badge.classList.remove('status-red', 'status-yellow', 'status-green');
+        badge.classList.add(durum.sinif);
+        badge.textContent = durum.metin;
+      }
+      const odenenEl = wrap.querySelector('.js-odenen-tutar');
+      const kalanEl = wrap.querySelector('.js-kalan-tutar');
+      if (odenenEl) odenenEl.textContent = money(s.odenenTutar || 0);
+      if (kalanEl) kalanEl.textContent = money(kalanTutar);
+      const ekleWrap = wrap.querySelector('.odeme-ekle-wrap');
+      const ekleBtn = wrap.querySelector('button[data-odeme-ekle]');
+      if (ekleBtn) ekleBtn.dataset.kalan = kalanTutar;
+      if (ekleWrap) ekleWrap.classList.toggle('hidden', kalanTutar <= 0.005);
+    }
+
+    function kartTeslimDurumunuGuncelle(s) {
+      const wrap = document.querySelector(`.order-card-wrap[data-order-id="${s.id}"]`);
+      if (!wrap) return;
+      wrap.classList.toggle('order-delivered', !!s.teslimEdildi);
+      wrap.classList.toggle('order-waiting', !s.teslimEdildi);
+      const bekliyorBtn = wrap.querySelector('button[data-durum="bekliyor"]');
+      const teslimBtn = wrap.querySelector('button[data-durum="teslim"]');
+      if (bekliyorBtn) bekliyorBtn.classList.toggle('active', !s.teslimEdildi);
+      if (teslimBtn) teslimBtn.classList.toggle('active', !!s.teslimEdildi);
+      const isletmeSatiri = wrap.querySelector('.oc-isletme');
+      const cariRozeti = wrap.querySelector('[data-cari-pending]');
+      const cariDisiOlmali = s.tur === 'satis' && !s.teslimEdildi;
+      if (cariDisiOlmali && !cariRozeti && isletmeSatiri) {
+        const rozet = document.createElement('span');
+        rozet.className = 'badge cari-pending-badge';
+        rozet.dataset.cariPending = '';
+        rozet.textContent = 'Cari dışı';
+        isletmeSatiri.appendChild(document.createTextNode(' '));
+        isletmeSatiri.appendChild(rozet);
+      } else if (!cariDisiOlmali && cariRozeti) {
+        cariRozeti.remove();
+      }
+    }
+
+    function seciliIsletmeOzetiniYenile() {
+      const secim = document.getElementById('sipIsletmeFiltre');
+      if (secim && secim.value) isletmeOzetGoster(secim.value);
+    }
+
+    function siparisMevcutFiltreyeUyuyor(s) {
+      const qEl = document.getElementById('sipArama');
+      const turEl = document.getElementById('sipTurFiltre');
+      const teslimEl = document.getElementById('sipTeslimFiltre');
+      const isletmeEl = document.getElementById('sipIsletmeFiltre');
+      const ayEl = document.getElementById('sipAyFiltre');
+      if (!qEl || !turEl || !teslimEl || !isletmeEl || !ayEl) return true;
+      const q = qEl.value.trim().toLowerCase();
+      const tur = turEl.value;
+      const teslim = teslimEl.value;
+      const isletme = isletmeEl.value;
+      const ay = ayEl.value;
+      if (tur && s.tur !== tur) return false;
+      if (teslim === 'evet' && !s.teslimEdildi) return false;
+      if (teslim === 'hayir' && s.teslimEdildi) return false;
+      if (isletme && s.isletmeAdi !== isletme) return false;
+      if (ay && String(s.tarih || '').slice(0, 7) !== ay) return false;
+      if (q && !((s.isletmeAdi || '').toLowerCase().includes(q) || String(s.siraNo).includes(q))) return false;
+      return true;
+    }
+
+    function filtreDisindaKaldiysaKartiKaldir(s) {
+      if (siparisMevcutFiltreyeUyuyor(s)) return;
+      const wrap = document.querySelector(`.order-card-wrap[data-order-id="${s.id}"]`);
+      if (wrap) wrap.remove();
+      aktifListe = aktifListe.filter(x => x.id !== s.id);
+      const host = document.getElementById('siparisListesi');
+      if (host && !host.querySelector('.order-card-wrap')) host.innerHTML = `<div class="empty-state">Kayıtlı sipariş yok.</div>`;
+    }
+
     function ciz(liste) {
       aktifListe = liste;
       const host = document.getElementById('siparisListesi');
       if (!liste.length) { host.innerHTML = `<div class="empty-state">Kayıtlı sipariş yok.</div>`; return; }
       const kalan = (s) => round2(s.toplamTutar - (s.odenenTutar || 0));
       host.innerHTML = liste.map(s => `
-        <div class="order-card-wrap ${s.teslimEdildi ? 'order-delivered' : 'order-waiting'}">
+        <div class="order-card-wrap ${s.teslimEdildi ? 'order-delivered' : 'order-waiting'}" data-order-id="${s.id}">
           <div class="order-card clickable" data-toggle="${s.id}">
             <div class="oc-main">
               <div class="oc-isletme">${esc(s.isletmeAdi)} <span class="badge badge-${s.tur}">${s.tur === 'satis' ? 'Satış' : 'Alış'}</span>
@@ -1178,8 +1309,8 @@
                   <button type="button" class="order-status-btn waiting ${!s.teslimEdildi ? 'active' : ''}" data-durum-set="${s.id}" data-durum="bekliyor">⏳ Bekliyor</button>
                   <button type="button" class="order-status-btn delivered ${s.teslimEdildi ? 'active' : ''}" data-durum-set="${s.id}" data-durum="teslim">✓ Teslim Edildi</button>
                 </span>
-                <span class="badge status-pill ${kalan(s) > 0 ? 'status-red' : 'status-green'}">${kalan(s) > 0 ? '✕ Ödenmedi' : '✓ Ödendi'}</span>
-                ${s.tur === 'satis' && !s.teslimEdildi ? '<span class="badge cari-pending-badge">Cari dışı</span>' : ''}
+                <button type="button" class="badge status-pill payment-status-btn ${odemeDurumBilgisi(s).sinif}" data-odeme-durum="${s.id}" title="Ödeme durumunu değiştirmek için tıkla">${odemeDurumBilgisi(s).metin}</button>
+                ${s.tur === 'satis' && !s.teslimEdildi ? '<span class="badge cari-pending-badge" data-cari-pending>Cari dışı</span>' : ''}
               </div>
               <div class="oc-meta">#${s.siraNo} · ${formatTarih(s.tarih)} · ${esc(s.olusturanKullanici || 'bilinmiyor')} tarafından oluşturuldu · ${s.kalemler.length} kalem ürün</div>
             </div>
@@ -1196,14 +1327,13 @@
             <div class="mt-4">
               <div class="sub" style="font-size:12.5px;">Sipariş tarihi: <strong>${formatTarih(s.tarih)}</strong>${s.sonDuzenlemeTarihi ? ` · Son düzenleme: ${formatTarih(s.sonDuzenlemeTarihi)} (${esc(s.sonDuzenleyen||'')})` : ''}</div>
               <div class="sub" style="font-size:12.5px;">Ödeme türü: <strong>${esc(s.odemeTuru)}</strong></div>
-              <div class="sub" style="font-size:12.5px;">Ödenen: <strong class="mono">${money(s.odenenTutar||0)}</strong> · Kalan: <strong class="mono">${money(kalan(s))}</strong></div>
+              <div class="sub" style="font-size:12.5px;">Ödenen: <strong class="mono js-odenen-tutar">${money(s.odenenTutar||0)}</strong> · Kalan: <strong class="mono js-kalan-tutar">${money(kalan(s))}</strong></div>
               ${s.notlar ? `<div class="sub" style="font-size:12.5px;">Not: ${esc(s.notlar)}</div>` : ''}
             </div>
-            ${kalan(s) > 0 ? `
-            <div style="display:flex; gap:8px; align-items:center; margin-top:12px;">
+            <div class="odeme-ekle-wrap ${kalan(s) > 0 ? '' : 'hidden'}" style="display:flex; gap:8px; align-items:center; margin-top:12px;">
               <input type="number" step="0.01" class="odeme-ekle-input" placeholder="Ödeme tutarı" style="max-width:160px; padding:8px 10px; border-radius:8px; border:1.5px solid var(--line);">
               <button class="btn btn-primary btn-sm" data-odeme-ekle="${s.id}" data-kalan="${kalan(s)}">Ödeme Ekle</button>
-            </div>` : ''}
+            </div>
           </div>
         </div>`).join('');
 
@@ -1234,10 +1364,31 @@
           const devam = await confirmDialog(`Girdiğin tutar (${money(tutar)}), kalan borçtan (${money(kalanTutar)}) fazla. Yine de eklensin mi?`, { hayirText: 'Hayır', evetText: 'Evet, Ekle', evetClass: 'btn-primary' });
           if (!devam) return;
         }
+        const siparis = liste.find(x => x.id === btn.dataset.odemeEkle);
+        if (!siparis) return;
         try {
           await fsOdemeEkle(btn.dataset.odemeEkle, tutar);
+          siparis.odenenTutar = round2((Number(siparis.odenenTutar) || 0) + tutar);
+          input.value = '';
+          kartOdemeDurumunuGuncelle(siparis);
+          seciliIsletmeOzetiniYenile();
           toast('Ödeme eklendi');
-          renderSiparisler();
+        } catch (err) { toast(err.message, true); }
+      }));
+      host.querySelectorAll('button[data-odeme-durum]').forEach(btn => btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const siparis = liste.find(x => x.id === btn.dataset.odemeDurum);
+        if (!siparis) return;
+        const yeniOdenen = await odemeTutariDialog(siparis);
+        if (yeniOdenen == null) return;
+        if (Math.abs(yeniOdenen - (Number(siparis.odenenTutar) || 0)) < 0.005) return;
+        try {
+          await fsUpdateSiparis(siparis.id, { odenenTutar: yeniOdenen });
+          siparis.odenenTutar = yeniOdenen;
+          kartOdemeDurumunuGuncelle(siparis);
+          seciliIsletmeOzetiniYenile();
+          const durum = odemeDurumBilgisi(siparis);
+          toast(`Ödeme durumu: ${durum.metin.replace(/^[^A-Za-zÇĞİÖŞÜçğıöşü]+/, '')}`);
         } catch (err) { toast(err.message, true); }
       }));
       host.querySelectorAll('button[data-sil]').forEach(btn => btn.addEventListener('click', async (e) => {
@@ -1255,8 +1406,11 @@
         if (!siparis || siparis.teslimEdildi === yeni) return;
         try {
           await fsUpdateSiparis(btn.dataset.durumSet, { teslimEdildi: yeni });
+          siparis.teslimEdildi = yeni;
+          kartTeslimDurumunuGuncelle(siparis);
+          seciliIsletmeOzetiniYenile();
+          filtreDisindaKaldiysaKartiKaldir(siparis);
           toast(yeni ? 'Sipariş teslim edildi olarak işaretlendi' : 'Sipariş bekliyor durumuna alındı');
-          renderSiparisler();
         } catch (err) { toast(err.message, true); }
       }));
     }

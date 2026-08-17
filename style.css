@@ -148,7 +148,7 @@ button{font-family:inherit;}
   transition:transform .12s ease, box-shadow .12s ease, background .12s ease;
 }
 .order-status-btn:hover{transform:translateY(-1px); box-shadow:0 2px 7px rgba(0,0,0,.12);}
-.order-status-btn.waiting.active{background:#8B6500; color:#fff; border-color:#8B6500;}
+.order-status-btn.waiting.active{background:#B8452A; color:#fff; border-color:#B8452A;}
 .order-status-btn.delivered.active{background:#18734F; color:#fff; border-color:#18734F;}
 .cari-pending-badge{background:#5D470C; color:#FFF4C9;}
 .isletme-search-toolbar #isletmeArama{flex:1; min-width:260px; max-width:620px;}
@@ -190,6 +190,10 @@ button.status-pill{cursor:pointer; transition:transform .12s ease, filter .15s e
 button.status-pill:hover{transform:translateY(-1px); filter:brightness(0.97);}
 .status-green{background:#E1F3EA; color:#137356;}
 .status-red{background:#FBE2DA; color:#B8452A;}
+.status-yellow{background:#FFF0B8; color:#8A6200;}
+.payment-status-btn{border:1px solid currentColor; box-shadow:none;}
+.payment-dialog-box{max-width:390px; text-align:left;}
+.payment-dialog-help{font-size:11.5px; line-height:1.45; color:var(--ink-soft); background:var(--sage-50); border-radius:8px; padding:8px 10px;}
 
 .line-item-header{
   display:grid; grid-template-columns:1.9fr 0.85fr 0.6fr 0.55fr 0.85fr 0.85fr 0.7fr auto;
