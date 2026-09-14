@@ -202,31 +202,175 @@
     meta: db.collection('meta')
   };
 
-  async function fsGetUrunler() {
-    const snap = await col.urunler.orderBy('ad').get();
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-  }
-  async function fsAddUrun(payload) {
-    const data = { ...payload, olusturmaTarihi: new Date().toISOString() };
-    const ref = await col.urunler.add(data);
-    return { id: ref.id, ...data };
-  }
-  async function fsUpdateUrun(id, payload) {
-    await col.urunler.doc(id).update(payload);
-  }
-  async function fsDeleteUrun(id) {
-    await col.urunler.doc(id).delete();
+  // Firestore kota koruması:
+  // - Aynı veriyi ekranlar arasında tekrar tekrar sunucudan okumaz.
+  // - Eşzamanlı aynı sorguları tek istekte birleştirir.
+  // - Yazma işlemlerinden sonra bellekteki veriyi yerinde günceller.
+  // - Cache süresi dolduğunda arka planda yeniden doğrular; okuma başarısızsa
+  //   elde eski veri varsa kullanıcıyı tamamen kilitlemez.
+  const CACHE_SURESI = 30 * 60 * 1000; // 30 dakika
+  const fsCache = {
+    urunler: { data: null, time: 0 },
+    siparisler: { data: null, time: 0 },
+    isletmeler: { data: null, time: 0 },
+    birimler: { data: null, time: 0 },
+    odemeTurleri: { data: null, time: 0 },
+    firma: { data: null, time: 0 },
+    teklifler: { data: null, time: 0 }
+  };
+  const fsPending = Object.create(null);
+
+  function cacheGecerli(alan) {
+    const c = fsCache[alan];
+    return !!(c && c.data !== null && (Date.now() - c.time) < CACHE_SURESI);
   }
 
-  async function fsGetAllSiparisler() {
-    const snap = await col.siparisler.get();
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  function cacheKaydet(alan, data) {
+    const c = fsCache[alan];
+    if (!c) return data;
+
+    // Dizi referansını mümkün olduğunca koru; state aynı diziyi kullanıyorsa
+    // cache yenilendiğinde state de otomatik güncel kalsın.
+    if (Array.isArray(data) && Array.isArray(c.data)) {
+      c.data.splice(0, c.data.length, ...data);
+    } else {
+      c.data = data;
+    }
+    c.time = Date.now();
+    return c.data;
   }
+
+  function cacheSuresiniYenile(alan) {
+    if (fsCache[alan] && fsCache[alan].data !== null) fsCache[alan].time = Date.now();
+  }
+
+  function firestoreDostuHata(err) {
+    const code = err && err.code ? String(err.code) : '';
+    const msg = err && err.message ? String(err.message) : '';
+    if (code.includes('resource-exhausted') || /quota exceeded/i.test(msg)) {
+      const e = new Error('Firestore günlük okuma kotası doldu. Mevcut önbellek kullanılabiliyorsa uygulama onunla devam eder; kota yenilendiğinde sunucu verisi tekrar senkronlanır.');
+      e.code = 'resource-exhausted';
+      return e;
+    }
+    return err;
+  }
+
+  async function cacheliOku(alan, loader, force = false) {
+    const c = fsCache[alan];
+    if (!force && cacheGecerli(alan)) return c.data;
+    if (!force && fsPending[alan]) return fsPending[alan];
+
+    let p;
+    p = (async () => {
+      try {
+        const data = await loader();
+        return cacheKaydet(alan, data);
+      } catch (err) {
+        // Daha önce başarılı alınmış veri varsa kota/ağ sorunu sırasında uygulamayı
+        // tamamen durdurmak yerine son bilinen veriyi kullan.
+        if (c && c.data !== null) {
+          console.warn('[Firestore cache fallback]', alan, err);
+          return c.data;
+        }
+        throw firestoreDostuHata(err);
+      } finally {
+        if (fsPending[alan] === p) delete fsPending[alan];
+      }
+    })();
+
+    fsPending[alan] = p;
+    return p;
+  }
+
+  function adaGoreSirala(a, b) {
+    return String(a && a.ad || '').localeCompare(String(b && b.ad || ''), 'tr');
+  }
+
+  function tariheGoreSirala(a, b) {
+    const ta = String(a && a.tarih || '');
+    const tb = String(b && b.tarih || '');
+    if (ta !== tb) return ta < tb ? 1 : -1;
+    return (Number(b && b.siraNo) || 0) - (Number(a && a.siraNo) || 0);
+  }
+
+  function cacheDiziUpsert(alan, item, sorter) {
+    const c = fsCache[alan];
+    if (!c || !Array.isArray(c.data) || !item || !item.id) return;
+    const idx = c.data.findIndex(x => x.id === item.id);
+    if (idx >= 0) c.data[idx] = { ...c.data[idx], ...item };
+    else c.data.push(item);
+    if (sorter) c.data.sort(sorter);
+    c.time = Date.now();
+  }
+
+  function cacheDiziPatch(alan, id, patch) {
+    const c = fsCache[alan];
+    if (!c || !Array.isArray(c.data)) return;
+    const idx = c.data.findIndex(x => x.id === id);
+    if (idx < 0) return;
+    c.data[idx] = { ...c.data[idx], ...patch };
+    c.time = Date.now();
+  }
+
+  function cacheDiziSil(alan, id) {
+    const c = fsCache[alan];
+    if (!c || !Array.isArray(c.data)) return;
+    const idx = c.data.findIndex(x => x.id === id);
+    if (idx >= 0) c.data.splice(idx, 1);
+    c.time = Date.now();
+  }
+
+  function stateDiziUpsert(alan, item, sorter) {
+    const arr = state[alan];
+    if (!Array.isArray(arr) || arr === fsCache[alan]?.data || !item || !item.id) return;
+    const idx = arr.findIndex(x => x.id === item.id);
+    if (idx >= 0) arr[idx] = { ...arr[idx], ...item };
+    else arr.push(item);
+    if (sorter) arr.sort(sorter);
+  }
+
+  function stateDiziPatch(alan, id, patch) {
+    const arr = state[alan];
+    if (!Array.isArray(arr) || arr === fsCache[alan]?.data) return;
+    const idx = arr.findIndex(x => x.id === id);
+    if (idx >= 0) arr[idx] = { ...arr[idx], ...patch };
+  }
+
+  function stateDiziSil(alan, id) {
+    const arr = state[alan];
+    if (!Array.isArray(arr) || arr === fsCache[alan]?.data) return;
+    const idx = arr.findIndex(x => x.id === id);
+    if (idx >= 0) arr.splice(idx, 1);
+  }
+
+  function yerelUrunStokDelta(urunId, delta) {
+    if (!urunId || !Number.isFinite(Number(delta)) || Number(delta) === 0) return;
+    const uygula = (arr) => {
+      if (!Array.isArray(arr)) return;
+      const u = arr.find(x => x.id === urunId);
+      if (!u || !u.stokTakibi || u.stokAdedi == null) return;
+      u.stokAdedi = round2((Number(u.stokAdedi) || 0) + Number(delta));
+    };
+    uygula(fsCache.urunler.data);
+    if (state.urunler !== fsCache.urunler.data) uygula(state.urunler);
+    cacheSuresiniYenile('urunler');
+  }
+
+  function yerelSiparisStokEtkisi(siparis, yon = 1) {
+    if (!siparis || !Array.isArray(siparis.kalemler)) return;
+    for (const k of siparis.kalemler) {
+      if (!k.urunId) continue;
+      const isaret = siparis.tur === 'alis' ? 1 : -1;
+      yerelUrunStokDelta(k.urunId, isaret * (Number(k.adet) || 0) * yon);
+    }
+  }
+
   function siparisCariAktifMi(siparis) {
     // Satış siparişleri, teslimat onaylanana kadar cariye yansımaz.
     // Alış kayıtlarının mevcut cari davranışı korunur.
     return siparis.tur !== 'satis' || siparis.teslimEdildi === true;
   }
+
   function isletmeBakiyeHesapla(siparisler, isletmeId) {
     let bakiye = 0;
     for (const s of siparisler) {
@@ -236,50 +380,123 @@
     }
     return round2(bakiye);
   }
-  async function fsGetIsletmeler() {
-    const [isletmelerSnap, siparisler] = await Promise.all([col.isletmeler.orderBy('ad').get(), fsGetAllSiparisler()]);
-    return isletmelerSnap.docs.map(d => {
-      const i = { id: d.id, ...d.data() };
-      return { ...i, bakiye: isletmeBakiyeHesapla(siparisler, i.id) };
-    });
+
+  function isletmeBakiyeleriniYereldeYenile() {
+    const siparisler = fsCache.siparisler.data;
+    const isletmeler = fsCache.isletmeler.data;
+    if (!Array.isArray(siparisler) || !Array.isArray(isletmeler)) return;
+    for (const i of isletmeler) i.bakiye = isletmeBakiyeHesapla(siparisler, i.id);
+    cacheSuresiniYenile('isletmeler');
+
+    if (Array.isArray(state.isletmeler) && state.isletmeler !== isletmeler) {
+      for (const i of state.isletmeler) i.bakiye = isletmeBakiyeHesapla(siparisler, i.id);
+    }
   }
+
+  async function fsGetUrunler(force = false) {
+    return cacheliOku('urunler', async () => {
+      const snap = await col.urunler.orderBy('ad').get();
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    }, force);
+  }
+
+  async function fsAddUrun(payload) {
+    const data = { ...payload, olusturmaTarihi: new Date().toISOString() };
+    const ref = await col.urunler.add(data);
+    const yeni = { id: ref.id, ...data };
+    cacheDiziUpsert('urunler', yeni, adaGoreSirala);
+    stateDiziUpsert('urunler', yeni, adaGoreSirala);
+    return yeni;
+  }
+
+  async function fsUpdateUrun(id, payload) {
+    await col.urunler.doc(id).update(payload);
+    cacheDiziPatch('urunler', id, payload);
+    stateDiziPatch('urunler', id, payload);
+  }
+
+  async function fsDeleteUrun(id) {
+    await col.urunler.doc(id).delete();
+    cacheDiziSil('urunler', id);
+    stateDiziSil('urunler', id);
+  }
+
+  async function fsGetAllSiparisler(force = false) {
+    return cacheliOku('siparisler', async () => {
+      const snap = await col.siparisler.get();
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    }, force);
+  }
+
+  async function fsGetIsletmeler(force = false) {
+    // Sipariş cache'i güncelse tekrar okunmaz; işletme bakiyeleri her çağrıda
+    // bellekteki siparişlerden yeniden hesaplanır.
+    const [isletmeler, siparisler] = await Promise.all([
+      cacheliOku('isletmeler', async () => {
+        const snap = await col.isletmeler.orderBy('ad').get();
+        return snap.docs.map(d => ({ id: d.id, ...d.data(), bakiye: 0 }));
+      }, force),
+      fsGetAllSiparisler(force)
+    ]);
+    for (const i of isletmeler) i.bakiye = isletmeBakiyeHesapla(siparisler, i.id);
+    cacheSuresiniYenile('isletmeler');
+    return isletmeler;
+  }
+
   async function fsAddIsletme(payload) {
     const data = { ...payload, olusturmaTarihi: new Date().toISOString() };
     const ref = await col.isletmeler.add(data);
-    return { id: ref.id, ...data };
+    const yeni = { id: ref.id, ...data };
+    const cacheKaydi = { ...yeni, bakiye: 0 };
+    cacheDiziUpsert('isletmeler', cacheKaydi, adaGoreSirala);
+    stateDiziUpsert('isletmeler', cacheKaydi, adaGoreSirala);
+    return yeni;
   }
+
   async function fsUpdateIsletme(id, payload) {
     await col.isletmeler.doc(id).update(payload);
+    cacheDiziPatch('isletmeler', id, payload);
+    stateDiziPatch('isletmeler', id, payload);
   }
+
   async function fsDeleteIsletme(id) {
     await col.isletmeler.doc(id).delete();
+    cacheDiziSil('isletmeler', id);
+    stateDiziSil('isletmeler', id);
   }
-  async function fsGetIsletmeDetay(id) {
-    const [isletmeSnap, siparislerSnap] = await Promise.all([
-      col.isletmeler.doc(id).get(),
-      col.siparisler.where('isletmeId', '==', id).get()
+
+  async function fsGetIsletmeDetay(id, force = false) {
+    const [isletmeler, tumSiparisler] = await Promise.all([
+      fsGetIsletmeler(force),
+      fsGetAllSiparisler(force)
     ]);
-    if (!isletmeSnap.exists) throw new Error('İşletme bulunamadı');
-    const isletme = { id: isletmeSnap.id, ...isletmeSnap.data() };
-    const siparisler = siparislerSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    const isletme = isletmeler.find(i => i.id === id);
+    if (!isletme) throw new Error('İşletme bulunamadı');
+    const siparisler = tumSiparisler
+      .filter(s => s.isletmeId === id)
+      .slice()
       .sort((a, b) => (a.tarih < b.tarih ? 1 : -1));
     const bakiye = isletmeBakiyeHesapla(siparisler, id);
     return { ...isletme, bakiye, siparisler };
   }
 
-  async function fsGetStok() {
-    const snap = await col.urunler.orderBy('ad').get();
-    return snap.docs.map(d => {
-      const u = d.data();
-      return {
-        id: d.id, ad: u.ad, birim: u.birim, stokTakibi: !!u.stokTakibi,
-        stokAdedi: u.stokAdedi, kritikStok: u.kritikStok,
-        kritikMi: u.stokTakibi && u.stokAdedi != null && u.kritikStok != null && u.stokAdedi <= u.kritikStok
-      };
-    });
+  async function fsGetStok(force = false) {
+    const urunler = await fsGetUrunler(force);
+    return urunler.map(u => ({
+      id: u.id,
+      ad: u.ad,
+      birim: u.birim,
+      stokTakibi: !!u.stokTakibi,
+      stokAdedi: u.stokAdedi,
+      kritikStok: u.kritikStok,
+      kritikMi: u.stokTakibi && u.stokAdedi != null && u.kritikStok != null && u.stokAdedi <= u.kritikStok
+    }));
   }
+
   async function fsUpdateStok(id, payload) {
     await col.urunler.doc(id).update(payload);
+    cacheDiziPatch('urunler', id, payload);
+    stateDiziPatch('urunler', id, payload);
   }
 
   async function fsAddSiparis(payload) {
@@ -288,7 +505,7 @@
     const serbestRef = col.meta.doc('serbestSiparisNumaralari');
     const yeniSiparisRef = col.siparisler.doc();
 
-    return db.runTransaction(async (tx) => {
+    const sonuc = await db.runTransaction(async (tx) => {
       const isletmeSnap = await tx.get(isletmeRef);
       if (!isletmeSnap.exists) throw new Error('İşletme bulunamadı');
       const sayacSnap = await tx.get(sayacRef);
@@ -342,21 +559,36 @@
       }
       return { id: yeniSiparisRef.id, ...siparis };
     });
+
+    cacheDiziUpsert('siparisler', sonuc, tariheGoreSirala);
+    yerelSiparisStokEtkisi(sonuc, 1);
+    isletmeBakiyeleriniYereldeYenile();
+    return sonuc;
   }
 
   async function fsUpdateSiparis(id, payload) {
     await col.siparisler.doc(id).update(payload);
+    cacheDiziPatch('siparisler', id, payload);
+    isletmeBakiyeleriniYereldeYenile();
   }
 
   async function fsOdemeEkle(id, ekTutar) {
+    const artis = round2(ekTutar);
     await col.siparisler.doc(id).update({
-      odenenTutar: firebase.firestore.FieldValue.increment(round2(ekTutar))
+      odenenTutar: firebase.firestore.FieldValue.increment(artis)
     });
+    const arr = fsCache.siparisler.data;
+    if (Array.isArray(arr)) {
+      const s = arr.find(x => x.id === id);
+      if (s) s.odenenTutar = round2((Number(s.odenenTutar) || 0) + artis);
+      cacheSuresiniYenile('siparisler');
+    }
+    isletmeBakiyeleriniYereldeYenile();
   }
 
   async function fsUpdateSiparisFull(eski, payload) {
     const siparisRef = col.siparisler.doc(eski.id);
-    return db.runTransaction(async (tx) => {
+    const sonuc = await db.runTransaction(async (tx) => {
       const refMap = new Map();
       async function girdiAl(urunId) {
         const ref = col.urunler.doc(urunId);
@@ -400,10 +632,17 @@
       }
       return { id: eski.id, ...yeni };
     });
+
+    // Eski siparişin stok etkisini geri al, yenisini uygula.
+    yerelSiparisStokEtkisi(eski, -1);
+    yerelSiparisStokEtkisi(sonuc, 1);
+    cacheDiziUpsert('siparisler', sonuc, tariheGoreSirala);
+    isletmeBakiyeleriniYereldeYenile();
+    return sonuc;
   }
 
   async function fsDeleteSiparis(siparis) {
-    return db.runTransaction(async (tx) => {
+    await db.runTransaction(async (tx) => {
       const urunSnaps = [];
       for (const k of siparis.kalemler) {
         if (!k.urunId) continue;
@@ -434,6 +673,10 @@
         tx.set(serbestRef, { liste: [...serbestListe, siparis.siraNo] }, { merge: true });
       }
     });
+
+    yerelSiparisStokEtkisi(siparis, -1);
+    cacheDiziSil('siparisler', siparis.id);
+    isletmeBakiyeleriniYereldeYenile();
   }
 
   async function fsAddUser(username, password) {
@@ -443,70 +686,102 @@
   }
 
   // ---- Ayarlanabilir listeler: birimler, ödeme türleri, firma ----
-  async function fsGetBirimler() {
-    const snap = await col.meta.doc('birimler').get();
-    if (!snap.exists || !Array.isArray(snap.data().liste) || !snap.data().liste.length) return VARSAYILAN_BIRIMLER.slice();
-    return snap.data().liste;
+  async function fsGetBirimler(force = false) {
+    return cacheliOku('birimler', async () => {
+      const snap = await col.meta.doc('birimler').get();
+      if (!snap.exists || !Array.isArray(snap.data().liste) || !snap.data().liste.length) return VARSAYILAN_BIRIMLER.slice();
+      return snap.data().liste;
+    }, force);
   }
+
   async function fsSetBirimler(liste) {
     await col.meta.doc('birimler').set({ liste }, { merge: true });
+    const kayit = Array.isArray(liste) ? liste.slice() : [];
+    cacheKaydet('birimler', kayit);
+    state.birimler = fsCache.birimler.data;
   }
-  async function fsGetOdemeTurleri() {
-    const snap = await col.meta.doc('odemeTurleri').get();
-    if (!snap.exists || !Array.isArray(snap.data().liste) || !snap.data().liste.length) return VARSAYILAN_ODEME_TURLERI.slice();
-    return snap.data().liste;
+
+  async function fsGetOdemeTurleri(force = false) {
+    return cacheliOku('odemeTurleri', async () => {
+      const snap = await col.meta.doc('odemeTurleri').get();
+      if (!snap.exists || !Array.isArray(snap.data().liste) || !snap.data().liste.length) return VARSAYILAN_ODEME_TURLERI.slice();
+      return snap.data().liste;
+    }, force);
   }
+
   async function fsSetOdemeTurleri(liste) {
     await col.meta.doc('odemeTurleri').set({ liste }, { merge: true });
+    const kayit = Array.isArray(liste) ? liste.slice() : [];
+    cacheKaydet('odemeTurleri', kayit);
+    state.odemeTurleri = fsCache.odemeTurleri.data;
   }
-  async function fsGetFirma() {
-    const snap = await col.meta.doc('firma').get();
-    return snap.exists ? snap.data() : { ad: 'Nur Umut Kürkçü Temizlik ve Hijyen', telefon: '', adres: '' };
+
+  async function fsGetFirma(force = false) {
+    return cacheliOku('firma', async () => {
+      const snap = await col.meta.doc('firma').get();
+      return snap.exists ? snap.data() : { ad: 'Nur Umut Kürkçü Temizlik ve Hijyen', telefon: '', adres: '' };
+    }, force);
   }
+
   async function fsSetFirma(payload) {
     await col.meta.doc('firma').set(payload, { merge: true });
+    const onceki = fsCache.firma.data && typeof fsCache.firma.data === 'object' ? fsCache.firma.data : {};
+    cacheKaydet('firma', { ...onceki, ...payload });
   }
 
   // ---- Teklifler / Faturalar ----
-  async function fsGetTeklifler() {
-    const snap = await col.teklifler.get();
-    return snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.tarih < b.tarih ? 1 : -1));
+  async function fsGetTeklifler(force = false) {
+    return cacheliOku('teklifler', async () => {
+      const snap = await col.teklifler.get();
+      return snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.tarih < b.tarih ? 1 : -1));
+    }, force);
   }
+
   async function fsAddTeklif(payload) {
     const data = { ...payload, durum: 'taslak', olusturmaTarihi: new Date().toISOString() };
     const ref = await col.teklifler.add(data);
-    return { id: ref.id, ...data };
+    const yeni = { id: ref.id, ...data };
+    cacheDiziUpsert('teklifler', yeni, (a, b) => (a.tarih < b.tarih ? 1 : -1));
+    return yeni;
   }
+
   async function fsUpdateTeklif(id, payload) {
     await col.teklifler.doc(id).update(payload);
+    cacheDiziPatch('teklifler', id, payload);
   }
+
   async function fsDeleteTeklif(id) {
     await col.teklifler.doc(id).delete();
+    cacheDiziSil('teklifler', id);
   }
+
   function kdvAyristir(toplamKdvDahil, kdvOrani) {
     const matrah = round2(toplamKdvDahil / (1 + (kdvOrani || 0) / 100));
     const kdv = round2(toplamKdvDahil - matrah);
     return { matrah, kdv };
   }
 
-  async function fsGetDashboard() {
-    const [isletmelerSnap, siparisler, urunler] = await Promise.all([
-      col.isletmeler.get(), fsGetAllSiparisler(), fsGetUrunler()
+  async function fsGetDashboard(force = false) {
+    const [isletmeler, siparisler, urunler] = await Promise.all([
+      fsGetIsletmeler(force), fsGetAllSiparisler(force), fsGetUrunler(force)
     ]);
     let toplamAlacak = 0, toplamBorc = 0;
     const isletmeBakiyeleri = [];
-    for (const d of isletmelerSnap.docs) {
-      const b = isletmeBakiyeHesapla(siparisler, d.id);
+    for (const i of isletmeler) {
+      // Sipariş cache'i dashboard çağrısında yenilenmiş olabilir; bakiyeyi burada
+      // tekrar hesaplamak ek Firestore okuması yapmadan tutarlılığı garanti eder.
+      const b = isletmeBakiyeHesapla(siparisler, i.id);
+      i.bakiye = b;
       if (b > 0) toplamAlacak += b; else if (b < 0) toplamBorc += -b;
-      if (b !== 0) isletmeBakiyeleri.push({ ad: d.data().ad, bakiye: b });
+      if (b !== 0) isletmeBakiyeleri.push({ ad: i.ad, bakiye: b });
     }
     isletmeBakiyeleri.sort((a, b) => Math.abs(b.bakiye) - Math.abs(a.bakiye));
-    const sonSiparisler = [...siparisler].sort((a, b) => (a.tarih < b.tarih ? 1 : -1)).slice(0, 8);
+    const sonSiparisler = [...siparisler].sort(tariheGoreSirala).slice(0, 8);
     const kritikStoklar = urunler.filter(u => u.stokTakibi && u.stokAdedi != null && u.kritikStok != null && u.stokAdedi <= u.kritikStok);
-    const teslimatBekleyen = siparisler.filter(s => !s.teslimEdildi).sort((a, b) => (a.tarih < b.tarih ? 1 : -1));
+    const teslimatBekleyen = siparisler.filter(s => !s.teslimEdildi).slice().sort(tariheGoreSirala);
     return {
       toplamAlacak: round2(toplamAlacak), toplamBorc: round2(toplamBorc),
-      isletmeSayisi: isletmelerSnap.size, urunSayisi: urunler.length,
+      isletmeSayisi: isletmeler.length, urunSayisi: urunler.length,
       sonSiparisler, kritikStoklar, teslimatBekleyen,
       alacaklarim: isletmeBakiyeleri.filter(i => i.bakiye > 0),
       borclarim: isletmeBakiyeleri.filter(i => i.bakiye < 0)
@@ -589,8 +864,7 @@
     // ---- İşletmenin genel cari durumu (bu irsaliyenin altında) ----
     let genelBakiye = 0, digerOdenenToplam = 0, tumSiparisSayisi = 0;
     try {
-      const digerSnap = await col.siparisler.where('isletmeId', '==', siparis.isletmeId).get();
-      const tumSip = digerSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const tumSip = (await fsGetAllSiparisler()).filter(s => s.isletmeId === siparis.isletmeId);
       tumSiparisSayisi = tumSip.length;
       genelBakiye = isletmeBakiyeHesapla(tumSip, siparis.isletmeId);
       digerOdenenToplam = round2(tumSip.filter(s => s.id !== siparis.id).reduce((t, s) => t + (s.odenenTutar || 0), 0));
@@ -720,6 +994,11 @@
       setView('dashboard');
     } else {
       state.username = null;
+      state.urunler = [];
+      state.isletmeler = [];
+      state.birimler = [];
+      state.odemeTurleri = [];
+      Object.values(fsCache).forEach(c => { c.data = null; c.time = 0; });
       appEl.classList.add('hidden');
       landing.classList.remove('hidden');
     }
@@ -1061,7 +1340,6 @@
         let isletme = state.isletmeler.find(i => i.ad.toLowerCase() === isletmeAdiGirilen.toLowerCase());
         if (!isletme) {
           isletme = await fsAddIsletme({ ad: isletmeAdiGirilen, telefon: '', adres: '', vergiNo: '', notlar: '' });
-          state.isletmeler.push(isletme);
           toast('Yeni işletme kaydedildi: ' + isletme.ad);
         }
 
@@ -1075,7 +1353,6 @@
               satisFiyati: satir.fiyat, kdvOrani: satir.kdv,
               stokTakibi: false, stokAdedi: null, kritikStok: null
             });
-            state.urunler.push(urun);
             toast('Yeni ürün kaydedildi: ' + urun.ad);
           }
           kalemler.push({
@@ -1368,7 +1645,6 @@
         if (!siparis) return;
         try {
           await fsOdemeEkle(btn.dataset.odemeEkle, tutar);
-          siparis.odenenTutar = round2((Number(siparis.odenenTutar) || 0) + tutar);
           input.value = '';
           kartOdemeDurumunuGuncelle(siparis);
           seciliIsletmeOzetiniYenile();
