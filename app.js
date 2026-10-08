@@ -539,6 +539,7 @@
         tarih: payload.tarih,
         kalemler: payload.kalemler,
         toplamTutar: payload.toplamTutar,
+        kdvDahil: payload.kdvDahil !== false,
         odemeTuru: payload.odemeTuru,
         odenenTutar: payload.odenenTutar,
         notlar: payload.notlar || '',
@@ -619,7 +620,7 @@
       const yeni = {
         isletmeId: payload.isletmeId, isletmeAdi: payload.isletmeAdi,
         tur: payload.tur, tarih: payload.tarih, kalemler: payload.kalemler,
-        toplamTutar: payload.toplamTutar, odemeTuru: payload.odemeTuru,
+        toplamTutar: payload.toplamTutar, kdvDahil: payload.kdvDahil !== false, odemeTuru: payload.odemeTuru,
         odenenTutar: payload.odenenTutar, notlar: payload.notlar || '',
         olusturanKullanici: eski.olusturanKullanici || payload.duzenleyen || '',
         teslimEdildi: !!payload.teslimEdildi,
@@ -761,6 +762,48 @@
     return { matrah, kdv };
   }
 
+  // Sipariş/irsaliye KDV modu:
+  // - KDV DAHİLDİR: ürünlerde kayıtlı KDV dahil birim fiyat aynen kullanılır.
+  // - KDV DAHİL DEĞİLDİR: kayıtlı KDV dahil fiyattan KDV ayrıştırılır ve net fiyat kullanılır.
+  // Eski kayıtlarda alan yoksa mevcut davranış korunur: KDV dahil kabul edilir.
+  function siparisKdvDahilMi(siparis) {
+    if (!siparis) return true;
+    if (typeof siparis.kdvDahil === 'boolean') return siparis.kdvDahil;
+    if (siparis.kdvDurumu) return siparis.kdvDurumu === 'dahil';
+    return true;
+  }
+
+  function kdvHaricBirimFiyat(kdvDahilFiyat, kdvOrani) {
+    const fiyat = Number(kdvDahilFiyat) || 0;
+    const oran = Number(kdvOrani) || 0;
+    if (oran <= 0) return round2(fiyat);
+    return round2(fiyat / (1 + oran / 100));
+  }
+
+  function kdvDahilBirimFiyat(kdvHaricFiyat, kdvOrani) {
+    const fiyat = Number(kdvHaricFiyat) || 0;
+    const oran = Number(kdvOrani) || 0;
+    return round2(fiyat * (1 + oran / 100));
+  }
+
+  function kalemEtkinBirimFiyat(birimFiyat, kdvOrani, kdvDahil) {
+    return kdvDahil ? round2(Number(birimFiyat) || 0) : kdvHaricBirimFiyat(birimFiyat, kdvOrani);
+  }
+
+  function kalemTutarKdvDurumunaGore(adet, birimFiyat, kdvOrani, kdvDahil) {
+    const etkinFiyat = kalemEtkinBirimFiyat(birimFiyat, kdvOrani, kdvDahil);
+    return round2((Number(adet) || 0) * etkinFiyat);
+  }
+
+  function siparisKdvToplami(siparis) {
+    if (!siparisKdvDahilMi(siparis)) return 0;
+    return round2((siparis.kalemler || []).reduce((toplam, k) => {
+      const brut = round2((Number(k.adet) || 0) * (Number(k.birimFiyat) || 0));
+      const net = kalemTutarKdvDurumunaGore(k.adet, k.birimFiyat, k.kdvOrani, false);
+      return toplam + Math.max(0, round2(brut - net));
+    }, 0));
+  }
+
   async function fsGetDashboard(force = false) {
     const [isletmeler, siparisler, urunler] = await Promise.all([
       fsGetIsletmeler(force), fsGetAllSiparisler(force), fsGetUrunler(force)
@@ -811,6 +854,9 @@
     let y = height - 60;
     const koyu = rgb(0.06, 0.32, 0.32);
     const gri = rgb(0.35, 0.35, 0.35);
+    const kdvDahil = siparisKdvDahilMi(siparis);
+    const kdvDurumMetni = kdvDahil ? 'KDV DAHILDIR' : 'KDV DAHIL DEGILDIR';
+    const kdvToplamBelge = siparisKdvToplami(siparis);
 
     page.drawText(pdfTr(firma.ad || 'Nur Umut Kurkcu Temizlik ve Hijyen'), { x: marginX, y, size: 16, font: fontBold, color: koyu });
     y -= 18;
@@ -842,17 +888,32 @@
       page.drawText(pdfTr(k.urunAdi).slice(0, 32), { x: cols[0].x + 4, y, size: 9, font, color: rgb(0, 0, 0) });
       page.drawText(String(k.adet), { x: cols[1].x + 4, y, size: 9, font });
       page.drawText(pdfTr(k.birim || 'adet'), { x: cols[2].x + 4, y, size: 9, font });
-      page.drawText(pdfSayi(k.birimFiyat), { x: cols[3].x + 4, y, size: 9, font });
+      const belgeBirimFiyat = kalemEtkinBirimFiyat(k.birimFiyat, k.kdvOrani, kdvDahil);
+      page.drawText(pdfSayi(belgeBirimFiyat), { x: cols[3].x + 4, y, size: 9, font });
       page.drawText(String(k.kdvOrani), { x: cols[4].x + 4, y, size: 9, font });
       page.drawText(pdfSayi(k.tutar), { x: cols[5].x + 4, y, size: 9, font });
       y -= 18;
     }
     y -= 10;
     page.drawLine({ start: { x: marginX, y }, end: { x: width - marginX, y }, thickness: 1, color: rgb(0.85, 0.85, 0.85) });
-    y -= 24;
-    page.drawText(pdfTr('Genel Toplam (KDV Dahil):'), { x: marginX + 260, y, size: 11, font: fontBold, color: koyu });
+    y -= 26;
+
+    // KDV durumu: dikkat çekici ama belgeyi domine etmeyen bilgi kutusu.
+    const kdvKutuDolgu = kdvDahil ? rgb(0.93, 0.97, 0.95) : rgb(0.98, 0.96, 0.90);
+    const kdvKutuCizgi = kdvDahil ? rgb(0.35, 0.60, 0.55) : rgb(0.72, 0.58, 0.30);
+    page.drawRectangle({ x: marginX + 260, y: y - 4, width: 235, height: 18, color: kdvKutuDolgu, borderColor: kdvKutuCizgi, borderWidth: 0.7 });
+    page.drawText(pdfTr(kdvDurumMetni), { x: marginX + 270, y: y + 1, size: 9.5, font: fontBold, color: koyu });
+    y -= 27;
+
+    const toplamEtiketi = kdvDahil ? 'Genel Toplam (KDV Dahil):' : 'Genel Toplam (KDV Dahil Degil):';
+    page.drawText(pdfTr(toplamEtiketi), { x: marginX + 260, y, size: 11, font: fontBold, color: koyu });
     page.drawText(`${pdfSayi(siparis.toplamTutar)} TL`, { x: marginX + 430, y, size: 11, font: fontBold, color: rgb(0, 0, 0) });
-    y -= 18;
+    y -= 15;
+    page.drawText(
+      pdfTr(kdvDahil ? `Toplam icindeki KDV: ${pdfSayi(kdvToplamBelge)} TL` : 'KDV hesaplamaya dahil edilmemistir.'),
+      { x: marginX + 260, y, size: 8.5, font, color: gri }
+    );
+    y -= 17;
     page.drawText(pdfTr('Odeme Turu: ') + pdfTr(siparis.odemeTuru), { x: marginX + 260, y, size: 9, font, color: gri });
     y -= 14;
     const kalan = siparis.toplamTutar - (siparis.odenenTutar || 0);
@@ -1145,6 +1206,18 @@
         <div id="kalemList"></div>
         <button id="kalemEkleBtn" type="button" class="btn btn-ghost btn-sm">+ Kalem ekle</button>
 
+        <div class="field" style="margin-top:16px; padding:12px 14px; border:1px solid rgba(14,59,54,.22); border-radius:10px; background:rgba(14,59,54,.045);">
+          <label style="display:block; margin-bottom:7px; font-weight:800;">KDV DURUMU</label>
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <select id="sipKdvDurumu" style="max-width:280px; font-weight:700;">
+              <option value="dahil" ${!editing || siparisKdvDahilMi(editing) ? 'selected' : ''}>KDV DAHİLDİR</option>
+              <option value="haric" ${editing && !siparisKdvDahilMi(editing) ? 'selected' : ''}>KDV DAHİL DEĞİLDİR</option>
+            </select>
+            <span id="sipKdvRozet" style="display:inline-block; padding:5px 9px; border-radius:999px; font-size:11.5px; font-weight:800;"></span>
+          </div>
+          <div id="sipKdvAciklama" class="sub" style="font-size:11.5px; margin-top:7px;"></div>
+        </div>
+
         <div class="grid grid-2 mt-4">
           <div class="field">
             <label>İrsaliye toplam tutarı (yaklaşık dağıtım için gerekli, yoksa kalemlerden hesaplanır)</label>
@@ -1174,7 +1247,7 @@
         </div>
 
         <div style="display:flex; align-items:center; gap:16px;">
-          <div class="mono" style="font-size:18px;">Toplam: <span id="sipToplamGoster">0,00 TL</span></div>
+          <div class="mono" style="font-size:18px;"><span id="sipToplamEtiket">Toplam (KDV Dahil):</span> <span id="sipToplamGoster">0,00 TL</span></div>
           <div class="spacer"></div>
           <button id="sipKaydetBtn" class="btn btn-amber">${editing ? 'Değişiklikleri Kaydet' : 'Siparişi Kaydet'}</button>
         </div>
@@ -1183,7 +1256,48 @@
 
     let kalemSayac = 0;
     const kalemList = document.getElementById('kalemList');
+    const kdvDurumuEl = document.getElementById('sipKdvDurumu');
     attachCombobox(document.getElementById('sipIsletme'), () => state.isletmeler.map(i => i.ad));
+
+    function formKdvDahilMi() {
+      return kdvDurumuEl.value === 'dahil';
+    }
+
+    function satirHesaplananTutar(row) {
+      const adet = Number(row.querySelector('.k-adet').value) || 0;
+      const fiyat = Number(row.querySelector('.k-fiyat').value) || 0;
+      const kdv = Number(row.querySelector('.k-kdv').value) || 0;
+      return kalemTutarKdvDurumunaGore(adet, fiyat, kdv, formKdvDahilMi());
+    }
+
+    function satirTutariniYaz(row) {
+      const tutarEl = row.querySelector('.k-tutar');
+      if (tutarEl) tutarEl.textContent = money(satirHesaplananTutar(row));
+    }
+
+    function kdvDurumGorunumunuYenile() {
+      const dahil = formKdvDahilMi();
+      const rozet = document.getElementById('sipKdvRozet');
+      const aciklama = document.getElementById('sipKdvAciklama');
+      const toplamEtiket = document.getElementById('sipToplamEtiket');
+      if (rozet) {
+        rozet.textContent = dahil ? 'KDV DAHİLDİR' : 'KDV DAHİL DEĞİLDİR';
+        rozet.style.background = dahil ? 'rgba(14,59,54,.10)' : 'rgba(176,120,25,.12)';
+        rozet.style.color = dahil ? 'var(--teal-700)' : '#7A5710';
+      }
+      if (aciklama) {
+        aciklama.textContent = dahil
+          ? 'Ürünlerde kayıtlı KDV dahil birim fiyat kullanılır; toplam KDV’li tutardır.'
+          : 'Ürünlerde kayıtlı KDV dahil fiyattan KDV ayrıştırılır; toplam KDV’siz (net) tutardır.';
+      }
+      if (toplamEtiket) toplamEtiket.textContent = dahil ? 'Toplam (KDV Dahil):' : 'Toplam (KDV Dahil Değil):';
+    }
+
+    function tumSatirTutarlariYenile() {
+      kalemList.querySelectorAll('.line-item-row').forEach(satirTutariniYaz);
+      kdvDurumGorunumunuYenile();
+      toplamGuncelle();
+    }
 
     function kalemSatiriEkle(mevcut) {
       kalemSayac++;
@@ -1216,9 +1330,7 @@
       const tutarEl = row.querySelector('.k-tutar');
       const yaklasikCb = row.querySelector('.k-yaklasik');
       function satirTutarGuncelle() {
-        const adet = Number(adetInput.value) || 0;
-        const fiyat = Number(fiyatInput.value) || 0;
-        tutarEl.textContent = money(adet * fiyat);
+        satirTutariniYaz(row);
       }
       adInput.addEventListener('input', () => {
         const eslesen = state.urunler.find(u => u.ad.toLowerCase() === adInput.value.trim().toLowerCase());
@@ -1255,11 +1367,9 @@
     function toplananHesapla() {
       let toplam = 0;
       kalemList.querySelectorAll('.line-item-row').forEach(row => {
-        const adet = Number(row.querySelector('.k-adet').value) || 0;
-        const fiyat = Number(row.querySelector('.k-fiyat').value) || 0;
-        toplam += adet * fiyat;
+        toplam += satirHesaplananTutar(row);
       });
-      return toplam;
+      return round2(toplam);
     }
     function toplamGuncelle() {
       const manuel = document.getElementById('sipManuelToplam').value;
@@ -1267,6 +1377,8 @@
       document.getElementById('sipToplamGoster').textContent = money(toplam);
     }
     document.getElementById('sipManuelToplam').addEventListener('input', toplamGuncelle);
+    kdvDurumuEl.addEventListener('change', tumSatirTutarlariYenile);
+    kdvDurumGorunumunuYenile();
 
     document.getElementById('yaklasikDagitBtn').addEventListener('click', () => {
       const manuel = Number(document.getElementById('sipManuelToplam').value);
@@ -1278,29 +1390,34 @@
 
       let sabitToplam = 0;
       sabitRows.forEach(r => {
-        const adet = Number(r.querySelector('.k-adet').value) || 0;
-        const fiyat = Number(r.querySelector('.k-fiyat').value) || 0;
-        sabitToplam += adet * fiyat;
+        sabitToplam += satirHesaplananTutar(r);
       });
       const kalan = round2(manuel - sabitToplam);
       if (kalan <= 0) return toast('Sabit (yaklaşık işaretlenmemiş) kalemler toplamı zaten hedefi aşıyor', true);
 
-      const agirlikToplam = yaklasikRows.reduce((t, r) => t + (Number(r.querySelector('.k-fiyat').value) || 0), 0);
+      const agirlikToplam = yaklasikRows.reduce((t, r) => {
+        const fiyat = Number(r.querySelector('.k-fiyat').value) || 0;
+        const kdv = Number(r.querySelector('.k-kdv').value) || 0;
+        return t + kalemEtkinBirimFiyat(fiyat, kdv, formKdvDahilMi());
+      }, 0);
       if (agirlikToplam <= 0) return toast('Yaklaşık işaretli kalemlere tahmini birim fiyat gir', true);
 
       let dagitilanToplam = 0;
       yaklasikRows.forEach((r, idx) => {
-        const yaklasikFiyat = Number(r.querySelector('.k-fiyat').value) || 0;
-        let pay = round2(kalan * (yaklasikFiyat / agirlikToplam));
+        const brutTahminiFiyat = Number(r.querySelector('.k-fiyat').value) || 0;
+        const kdv = Number(r.querySelector('.k-kdv').value) || 0;
+        const etkinTahminiFiyat = kalemEtkinBirimFiyat(brutTahminiFiyat, kdv, formKdvDahilMi());
+        let pay = round2(kalan * (etkinTahminiFiyat / agirlikToplam));
         // son satırda yuvarlama farkını kapat (yine de hedefi aşmadan)
         if (idx === yaklasikRows.length - 1) pay = round2(kalan - dagitilanToplam);
-        let adet = Math.max(1, Math.round(pay / yaklasikFiyat));
-        let birimFiyat = floor2(pay / adet);
-        if (birimFiyat <= 0) { adet = 1; birimFiyat = floor2(pay); }
+        let adet = Math.max(1, Math.round(pay / etkinTahminiFiyat));
+        let etkinBirimFiyat = floor2(pay / adet);
+        if (etkinBirimFiyat <= 0) { adet = 1; etkinBirimFiyat = floor2(pay); }
+        const kayitliBirimFiyat = formKdvDahilMi() ? etkinBirimFiyat : kdvDahilBirimFiyat(etkinBirimFiyat, kdv);
         r.querySelector('.k-adet').value = adet;
-        r.querySelector('.k-fiyat').value = birimFiyat;
-        r.querySelector('.k-tutar').textContent = money(adet * birimFiyat);
-        dagitilanToplam = round2(dagitilanToplam + adet * birimFiyat);
+        r.querySelector('.k-fiyat').value = kayitliBirimFiyat;
+        satirTutariniYaz(r);
+        dagitilanToplam = round2(dagitilanToplam + satirHesaplananTutar(r));
       });
       toplamGuncelle();
       toast('Yaklaşık kalemler dağıtıldı — istersen adet/fiyatı elle de düzeltebilirsin');
@@ -1315,6 +1432,7 @@
       const isletmeAdiGirilen = document.getElementById('sipIsletme').value.trim();
       if (!isletmeAdiGirilen) return toast('Lütfen işletme adı girin', true);
 
+      const kdvDahil = formKdvDahilMi();
       const satirlar = [];
       kalemList.querySelectorAll('.line-item-row').forEach(row => {
         const ad = row.querySelector('.k-urun-ad').value.trim();
@@ -1357,7 +1475,8 @@
           }
           kalemler.push({
             urunId: urun.id, urunAdi: satir.ad, birim: satir.birim, adet: satir.adet,
-            birimFiyat: satir.fiyat, kdvOrani: satir.kdv, tutar: round2(satir.adet * satir.fiyat)
+            birimFiyat: satir.fiyat, kdvOrani: satir.kdv,
+            tutar: kalemTutarKdvDurumunaGore(satir.adet, satir.fiyat, satir.kdv, kdvDahil)
           });
           kullanilanBirimler.add(satir.birim);
         }
@@ -1388,6 +1507,7 @@
           tarih: document.getElementById('sipTarih').value || todayISO(),
           kalemler,
           toplamTutar: manuelToplam !== '' ? round2(Number(manuelToplam)) : hesaplananToplam,
+          kdvDahil,
           odemeTuru,
           odenenTutar: round2(Number(document.getElementById('sipOdenen').value) || 0),
           notlar: document.getElementById('sipNot').value,
@@ -1477,11 +1597,15 @@
     let aktifListe = tumu;
 
     function kalemSatirlariHtml(s) {
-      return s.kalemler.map(k => `<tr>
-        <td>${esc(k.urunAdi)}</td><td class="text-right mono">${k.adet}</td><td>${esc(k.birim || 'adet')}</td>
-        <td class="text-right mono">${money(k.birimFiyat)}</td><td class="text-right mono">%${k.kdvOrani}</td>
-        <td class="text-right mono">${money(k.tutar)}</td>
-      </tr>`).join('');
+      const kdvDahil = siparisKdvDahilMi(s);
+      return s.kalemler.map(k => {
+        const etkinFiyat = kalemEtkinBirimFiyat(k.birimFiyat, k.kdvOrani, kdvDahil);
+        return `<tr>
+          <td>${esc(k.urunAdi)}</td><td class="text-right mono">${k.adet}</td><td>${esc(k.birim || 'adet')}</td>
+          <td class="text-right mono">${money(etkinFiyat)}</td><td class="text-right mono">%${k.kdvOrani}</td>
+          <td class="text-right mono">${money(k.tutar)}</td>
+        </tr>`;
+      }).join('');
     }
 
     function odemeDurumBilgisi(s) {
@@ -1604,6 +1728,7 @@
             <div class="mt-4">
               <div class="sub" style="font-size:12.5px;">Sipariş tarihi: <strong>${formatTarih(s.tarih)}</strong>${s.sonDuzenlemeTarihi ? ` · Son düzenleme: ${formatTarih(s.sonDuzenlemeTarihi)} (${esc(s.sonDuzenleyen||'')})` : ''}</div>
               <div class="sub" style="font-size:12.5px;">Ödeme türü: <strong>${esc(s.odemeTuru)}</strong></div>
+              <div class="sub" style="font-size:12.5px; margin-top:3px;">KDV durumu: <strong style="color:${siparisKdvDahilMi(s) ? 'var(--teal-700)' : '#7A5710'};">${siparisKdvDahilMi(s) ? 'KDV DAHİLDİR' : 'KDV DAHİL DEĞİLDİR'}</strong></div>
               <div class="sub" style="font-size:12.5px;">Ödenen: <strong class="mono js-odenen-tutar">${money(s.odenenTutar||0)}</strong> · Kalan: <strong class="mono js-kalan-tutar">${money(kalan(s))}</strong></div>
               ${s.notlar ? `<div class="sub" style="font-size:12.5px;">Not: ${esc(s.notlar)}</div>` : ''}
             </div>
